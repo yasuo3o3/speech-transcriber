@@ -117,6 +117,29 @@ NOTION_PARENT_PAGE_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 python main.py
 \`\`\`
 
+### Windowsでワンボタン実行する方法
+
+プロジェクトのルートディレクトリ（main.py がある場所）に `run_transcriber.bat` というファイルを作成し、以下の内容を貼り付けて保存します：
+
+\`\`\`batch
+@echo off
+REM ===== Speech Transcriber 実行バッチ =====
+cd /d %~dp0
+python main.py
+pause
+\`\`\`
+
+**各行の説明:**
+- `cd /d %~dp0` : このバッチファイルが置いてある場所に移動します
+- `python main.py` : プログラムを実行します  
+- `pause` : 実行後にウィンドウが自動で閉じないようにします
+
+`run_transcriber.bat` を **ダブルクリック**することで、Speech Transcriber が起動します。
+
+**より便利にするには:**
+- `run_transcriber.bat` の ショートカットを作成し、デスクトップなどに配置してください
+- プロパティからアイコンを変更することで分かりやすくできます
+
 ### Android（Pydroid3）での実行
 
 1. Pydroid3アプリでプロジェクトフォルダを開く
