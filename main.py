@@ -17,6 +17,13 @@ from utils import format_text_with_periods, get_japanese_datetime
 
 load_dotenv()
 
+# User prompt messages
+MSG_SAVE_CONFIRM = "この録音を保存しますか？ (y=保存 / n=破棄): "  # EN: "Do you want to save this recording? (y=save / n=discard): "
+MSG_DISCARD_CONFIRM = "本当にこの録音を破棄しますか？ (y=破棄 / n=保存に戻る): "  # EN: "Are you sure you want to discard this recording? (y=discard / n=go back to save): "
+MSG_ENTER_TITLE = "タイトルを入力してください: "  # EN: "Enter title: "
+MSG_ENTER_SUMMARY = "概要を入力してください（空でも可）: "  # EN: "Enter summary (optional): "
+MSG_INPUT_INVALID = "入力が認識できません。y/yes/はい または n/no/いいえ を入力してください。"
+
 class AudioRecorder:
     def __init__(self):
         self.sample_rate = 16000
@@ -110,11 +117,11 @@ class SpeechTranscriber:
                 return False
             
             # Unrecognized input
-            print("入力が認識できません。y/yes/はい または n/no/いいえ を入力してください。")
+            print(MSG_INPUT_INVALID)
     
     def confirm_discard(self) -> bool:
         """Two-stage confirmation for discarding recording"""
-        return self.get_yes_no_input("本当にこの録音を破棄しますか？ (y/n): ")
+        return self.get_yes_no_input(MSG_DISCARD_CONFIRM)
         
     def transcribe_audio(self, audio_file_path: str) -> Optional[str]:
         """Transcribe audio using OpenAI gpt-4o-transcribe"""
@@ -188,7 +195,7 @@ class SpeechTranscriber:
                 return
             
             # Ask user if they want to save
-            want_save = self.get_yes_no_input("\nDo you want to save this recording? (y/n): ")
+            want_save = self.get_yes_no_input(f"\n{MSG_SAVE_CONFIRM}")
             
             if not want_save:
                 # Two-stage confirmation for discard
@@ -226,17 +233,14 @@ class SpeechTranscriber:
             print("-" * 30)
             
             # Get title and summary from user
-            print("\nEnter title: ", end="")
+            print(f"\n{MSG_ENTER_TITLE}", end="")
             title = input().strip()
             if not title:
-                print("Title is required.")
+                print("タイトルは必須です。")  # EN: "Title is required."
                 return
             
-            print("Enter summary: ", end="")
+            print(f"{MSG_ENTER_SUMMARY}", end="")
             summary = input().strip()
-            if not summary:
-                print("Summary is required.")
-                return
             
             # Process and save
             print("\nSaving...")
