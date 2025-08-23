@@ -18,11 +18,11 @@ from utils import format_text_with_periods, get_japanese_datetime
 load_dotenv()
 
 # User prompt messages
-MSG_SAVE_CONFIRM = "この録音を保存しますか？ (y=保存 / n=破棄): "  # EN: "Do you want to save this recording? (y=save / n=discard): "
-MSG_DISCARD_CONFIRM = "本当にこの録音を破棄しますか？ (y=破棄 / n=保存に戻る): "  # EN: "Are you sure you want to discard this recording? (y=discard / n=go back to save): "
+MSG_SAVE_CONFIRM = "今回の文字起こしを保存しますか？ (y=保存 / n=破棄): "  # EN: "Do you want to save this recording? (y=save / n=discard): "
+MSG_DISCARD_CONFIRM = "破棄するのですね？ (y=破棄 / n=保存): "  # EN: "Are you sure you want to discard this recording? (y=discard / n=go back to save): "
 MSG_ENTER_TITLE = "タイトルを入力してください: "  # EN: "Enter title: "
 MSG_ENTER_SUMMARY = "概要を入力してください（空でも可）: "  # EN: "Enter summary (optional): "
-MSG_INPUT_INVALID = "入力が認識できません。y/yes/はい または n/no/いいえ を入力してください。"
+MSG_INPUT_INVALID = "入力が認識できません。[y]または[n]を入力してください。"
 
 class AudioRecorder:
     def __init__(self):
