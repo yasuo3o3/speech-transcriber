@@ -497,3 +497,92 @@ README と history.md が更新されている。
 - 10万文字級の長文での動作テスト
 - バッチ投入と自動ページ分割の確認
 - レート制限時のリトライ動作検証
+
+## 2025-01-25 21:00 JST - 保存直前処理を「ローカル補正＋AI補正」に二段構成へ変更
+
+### 送信プロンプト全文
+修正依頼（保存直前処理を「ローカル補正＋AI補正」に二段構成へ変更）
+
+【目的】
+- 既存フロー（録音→20秒起こし→Enter停止→y/n→Discord/Notion）はそのまま維持。
+- 保存直前に以下の二段構成で補正を行いたい：
+  1) ローカルフィルター：全角→半角正規化＋技術用語ホワイトリスト置換
+  2) AI補正：gpt-4o による軽い補正（テストモード時は mini と両方）
+
+【仕様】
+1) utils.py
+   - 既存の `normalize_tech_terms()` を活かして、  
+     - 手順A: `unicodedata.normalize("NFKC", text)` で全角英数記号を半角化  
+     - 手順B: ホワイトリスト置換（.env → .env, README.md → README.md, history.md → history.md, Git/GitHub, Python, Notion/Discord など）
+   - その結果を返す（AI補正前の整形段階）。
+
+2) AI補正用関数
+   - `def postprocess_with_ai(text: str, context_hint: str = "", test_mode: bool = False) -> str`
+   - プロンプト内容:  
+     「入力テキストを壊さず、句読点・誤字を軽く整える。内容は変えない。専門用語やタグ（例: env, README.md）はそのまま保持。」
+   - 通常モード（test_mode=False）: gpt-4o のみに投げる → 補正テキストを返す
+   - テストモード（test_mode=True）:  
+     - gpt-4o-mini に投げた結果と gpt-4o に投げた結果を両方取得  
+     - 出力を以下のフォーマットで結合して返す：
+       ```
+       === gpt-4o-mini 補正結果 ===
+       （miniの補正結果）
+
+       === gpt-4o 補正結果 ===
+       （4oの補正結果）
+       ```
+
+3) main.py
+   - 保存直前のフローで：
+     - `text = normalize_tech_terms(text)` を実行  
+     - その後 `text = postprocess_with_ai(text, context_hint=f"{title} {summary}", test_mode=TEST_MODE)` を実行  
+   - Discord送信・Notion保存ともこの補正後テキストを利用
+
+4) .env に設定を追加
+   - `NORMALIZE_TECH_TERMS=true|false`（既定 true）  
+   - `POSTPROCESS_TEST_MODE=true|false`（既定 false）
+
+5) README.md
+   - 保存直前の二段補正フローを明記：
+     1) ローカルフィルターで全角→半角・技術用語統一  
+     2) AI補正で軽い整形（gpt-4o）  
+   - `.env` のフラグで無効化・テストモード切替ができることを説明  
+   - テストモード時は gpt-4o-mini と gpt-4o の両方の補正結果が並んで出力されることも記載
+
+6) history.md
+   - 本依頼内容を追記（日時JST／件名／送信プロンプト全文／出力要約／次アクション）
+
+【受け入れ基準】
+- フロー自体（録音開始〜保存確認〜Discord/Notion送信）は変わらない
+- ローカルフィルターが適用され、.env などが確実に統一される
+- 通常モードでは gpt-4o 補正済みテキストが保存される
+- テストモードでは mini と 4o の両方がラベル付きで出力される
+- README と history.md が更新されている
+
+【コミット文】
+- この変更に対応する git commit メッセージを日本語で提案してください
+
+### 出力概要
+- utils.py に normalize_tech_terms と postprocess_with_ai の2つの新機能を実装
+- 二段構成の補正処理：ローカル正規化→AI補正の順序で実行
+- main.py の process_transcription メソッドに apply_text_corrections を追加
+- .envSample ファイルを新規作成し、NORMALIZE_TECH_TERMS と POSTPROCESS_TEST_MODE を追加
+- README.md に機能説明、環境設定、ファイル構成の更新を実施
+
+### 主要ファイル
+- utils.py（27-129行目に normalize_tech_terms と postprocess_with_ai を実装）
+- main.py（20-22行目に設定フラグ、152-196行目に補正処理フロー）
+- .envSample（新規作成、全設定項目を網羅）
+- README.md（10-12行目に機能追加、65-76行目に補正設定説明、189行目にutils.pyの説明更新）
+- prompts/history.md（本ログエントリを追記）
+
+### 注意点
+- 既存フローは完全維持（録音→転写→y/n確認→タイトル/概要入力→保存）
+- 補正処理は保存直前のみに適用、ユーザーには途中結果は非表示
+- エラー時はローカル補正のみで続行する安全設計
+- テストモードでは両モデルの結果を比較表示
+
+### 次アクション
+- .envSample を参考に .env ファイルを作成・設定
+- 録音テストで補正機能の動作確認
+- POSTPROCESS_TEST_MODE=true での両モデル比較テスト

@@ -13,9 +13,13 @@ from dotenv import load_dotenv
 
 from discord_client import DiscordClient
 from notion_api import NotionClient
-from utils import format_text_with_periods, get_japanese_datetime
+from utils import format_text_with_periods, get_japanese_datetime, normalize_tech_terms, postprocess_with_ai
 
 load_dotenv()
+
+# Configuration flags
+NORMALIZE_TECH_TERMS = os.getenv('NORMALIZE_TECH_TERMS', 'true').lower() == 'true'
+POSTPROCESS_TEST_MODE = os.getenv('POSTPROCESS_TEST_MODE', 'false').lower() == 'true'
 
 # User prompt messages
 MSG_SAVE_CONFIRM = "今回の文字起こしを保存しますか？ (y=保存 / n=破棄): "  # EN: "Do you want to save this recording? (y=save / n=discard): "
@@ -145,8 +149,34 @@ class SpeechTranscriber:
             print(f"Error during transcription: {e}")
             return None
     
+    def apply_text_corrections(self, text: str, title: str, summary: str) -> str:
+        """Apply two-stage text correction: local normalization + AI correction"""
+        corrected_text = text
+        
+        # Stage 1: Local normalization (if enabled)
+        if NORMALIZE_TECH_TERMS:
+            corrected_text = normalize_tech_terms(corrected_text)
+            print("✓ Applied local tech terms normalization")
+        
+        # Stage 2: AI post-processing (if OpenAI API is available)
+        try:
+            context_hint = f"{title} {summary}".strip()
+            corrected_text = postprocess_with_ai(corrected_text, context_hint=context_hint, test_mode=POSTPROCESS_TEST_MODE)
+            if POSTPROCESS_TEST_MODE:
+                print("✓ Applied AI post-processing (test mode - showing both results)")
+            else:
+                print("✓ Applied AI post-processing with gpt-4o")
+        except Exception as e:
+            print(f"⚠ AI post-processing failed: {e}")
+            print("Proceeding with local normalization only")
+        
+        return corrected_text
+    
     def process_transcription(self, text: str, title: str, summary: str):
         """Process transcription by sending to Discord and Notion"""
+        # Apply two-stage text correction before saving
+        corrected_text = self.apply_text_corrections(text, title, summary)
+        
         success_count = 0
         
         # Send to Discord
@@ -156,8 +186,8 @@ class SpeechTranscriber:
         else:
             print("✗ Failed to send to Discord")
         
-        # Save to Notion
-        if self.notion_client.create_page(title, summary, text):
+        # Save to Notion with corrected text
+        if self.notion_client.create_page(title, summary, corrected_text):
             print("✓ Successfully saved to Notion")
             success_count += 1
         else:

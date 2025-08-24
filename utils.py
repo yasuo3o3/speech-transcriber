@@ -1,5 +1,8 @@
+import os
 import re
+import unicodedata
 from datetime import datetime, timezone, timedelta
+from openai import OpenAI
 
 def format_text_with_periods(text: str) -> str:
     """Format text by adding line breaks after periods for better readability"""
@@ -22,3 +25,105 @@ def get_japanese_datetime() -> str:
     jst = timezone(timedelta(hours=9))
     now = datetime.now(jst)
     return now.strftime("%Y-%m-%d %H:%M")
+
+def normalize_tech_terms(text: str) -> str:
+    """
+    Normalize text with two-stage process:
+    1) Unicode NFKC normalization (full-width → half-width)
+    2) Whitelist-based tech term replacement
+    """
+    if not text:
+        return text
+    
+    # Stage A: Unicode normalization (full-width → half-width)
+    normalized = unicodedata.normalize("NFKC", text)
+    
+    # Stage B: Whitelist-based tech term replacement
+    tech_terms = {
+        ".env": ".env",
+        "readme.md": "README.md",
+        "README.md": "README.md",
+        "history.md": "history.md",
+        "git": "Git",
+        "github": "GitHub",
+        "python": "Python",
+        "notion": "Notion",
+        "discord": "Discord",
+        "openai": "OpenAI",
+        "gpt": "GPT",
+        "api": "API",
+        "json": "JSON",
+        "html": "HTML",
+        "css": "CSS",
+        "javascript": "JavaScript",
+        "typescript": "TypeScript",
+        "react": "React",
+        "vue": "Vue",
+        "nodejs": "Node.js",
+        "npm": "npm",
+        "yarn": "yarn",
+        "docker": "Docker",
+        "kubernetes": "Kubernetes",
+        "aws": "AWS",
+        "gcp": "GCP",
+        "azure": "Azure"
+    }
+    
+    result = normalized
+    for original, replacement in tech_terms.items():
+        # Case-insensitive replacement, preserving word boundaries
+        pattern = r'\b' + re.escape(original) + r'\b'
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    
+    return result
+
+def postprocess_with_ai(text: str, context_hint: str = "", test_mode: bool = False) -> str:
+    """
+    Post-process text using AI for light correction of punctuation and typos.
+    
+    Args:
+        text: Input text to correct
+        context_hint: Context information (title + summary)
+        test_mode: If True, returns both gpt-4o-mini and gpt-4o results
+        
+    Returns:
+        Corrected text, or formatted comparison in test mode
+    """
+    if not text.strip():
+        return text
+    
+    system_prompt = """入力テキストを壊さず、句読点・誤字を軽く整える。内容は変えない。専門用語やタグ（例: .env, README.md）はそのまま保持。自然な日本語に軽く整形するだけで、大幅な変更は不要。"""
+    
+    user_prompt = f"以下のテキストを軽く補正してください：\n\n{text}"
+    if context_hint.strip():
+        user_prompt = f"コンテキスト: {context_hint}\n\n{user_prompt}"
+    
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    
+    def get_ai_correction(model: str) -> str:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=4000
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"AI correction error with {model}: {e}")
+            return text
+    
+    if test_mode:
+        mini_result = get_ai_correction("gpt-4o-mini")
+        gpt4o_result = get_ai_correction("gpt-4o")
+        
+        return f"""=== gpt-4o-mini 補正結果 ===
+{mini_result}
+
+=== gpt-4o 補正結果 ===
+{gpt4o_result}"""
+    else:
+        return get_ai_correction("gpt-4o")

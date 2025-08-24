@@ -7,6 +7,9 @@ PC（Windows PowerShell）およびAndroid（Pydroid3）で動作する音声文
 - 20秒チャンク + 2秒オーバーラップでの高品質音声録音
 - OpenAI gpt-4o-transcribeを使用した高精度文字起こし
 - 「。」ごとの自動改行で読みやすいテキスト整形
+- **保存直前の二段補正処理**：
+  1) ローカルフィルター：全角→半角正規化＋技術用語ホワイトリスト置換
+  2) AI補正：gpt-4o による軽い整形（句読点・誤字を軽く補正）
 - Discordへのタイトル＋概要通知
 - Notionへのタイトル＋概要＋本文全文保存
 - エラー時の自動リトライ機能
@@ -40,10 +43,10 @@ pip install notion-client
 
 ### 2. 環境変数の設定
 
-\`.env.example\`を\`.env\`にコピーし、必要な値を設定してください：
+\`.envSample\`を\`.env\`にコピーし、必要な値を設定してください：
 
 \`\`\`bash
-cp .env.example .env
+cp .envSample .env
 \`\`\`
 
 \`.env\`ファイルに以下の情報を入力：
@@ -58,7 +61,19 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your_webhook_url_here
 # Notion API Configuration
 NOTION_TOKEN=your_notion_integration_token_here
 NOTION_PARENT_PAGE_ID=your_notion_parent_page_id_here
+
+# Text Processing Configuration
+NORMALIZE_TECH_TERMS=true
+POSTPROCESS_TEST_MODE=false
 \`\`\`
+
+#### 補正処理の設定
+
+- **NORMALIZE_TECH_TERMS**: ローカルフィルターの有効/無効（\`true\`/\`false\`）
+  - 全角英数記号を半角化、技術用語を統一（.env, README.md, Git/GitHub, Python など）
+- **POSTPROCESS_TEST_MODE**: AI補正のテストモード（\`true\`/\`false\`）
+  - \`false\`: gpt-4o のみで補正
+  - \`true\`: gpt-4o-mini と gpt-4o 両方の結果を表示して比較
 
 #### 各APIキーの取得方法
 
@@ -171,13 +186,15 @@ speech-transcriber/
 ├── main.py              # メインアプリケーション
 ├── discord_client.py    # Discord連携
 ├── notion_api.py        # Notion連携
-├── utils.py            # ユーティリティ関数
+├── utils.py            # ユーティリティ関数（テキスト補正含む）
 ├── requirements.txt    # 依存パッケージ
-├── .env.example       # 環境変数テンプレート
+├── .envSample         # 環境変数テンプレート
 ├── .env              # 環境変数（要設定）
 ├── .gitignore        # Git無視ファイル設定
 ├── LICENSE           # MITライセンス
-└── README.md         # このファイル
+├── README.md         # このファイル
+└── prompts/
+    └── history.md    # 開発履歴
 \`\`\`
 
 ## トラブルシューティング

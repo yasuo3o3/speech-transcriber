@@ -1,0 +1,16 @@
+# OpenAI API Configuration
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Discord Webhook Configuration  
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your_webhook_url_here
+
+# Notion API Configuration
+NOTION_TOKEN=your_notion_integration_token_here
+NOTION_PARENT_PAGE_ID=your_notion_parent_page_id_here
+
+# Text Processing Configuration
+# Enable/disable local tech terms normalization (full-width → half-width + whitelist replacement)
+NORMALIZE_TECH_TERMS=true
+
+# AI post-processing test mode (false=gpt-4o only, true=show both gpt-4o-mini and gpt-4o results)
+POSTPROCESS_TEST_MODE=false
