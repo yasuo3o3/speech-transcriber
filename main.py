@@ -8,11 +8,12 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Queue, Empty
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import logging
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -69,41 +70,198 @@ MSG_ENTER_SUMMARY = "概要を入力してください（空でも可）: "  # E
 MSG_INPUT_INVALID = "入力が認識できません。[y]または[n]を入力してください。"
 
 class AudioRecorder:
-    """Ring Buffer-based audio recorder (Producer)"""
+    """Ring Buffer-based audio recorder with auto device detection and downsampling (Producer)"""
     
     def __init__(self):
-        self.sample_rate = 16000
-        self.channels = 1
+        # Target output settings (internal processing)
+        self.target_sample_rate = 16000
+        self.target_channels = 1
         self.chunk_duration = 20
         self.overlap_duration = 2
         self.is_recording = False
         self.stop_event = threading.Event()
         
+        # Device and recording settings (auto-detected)
+        self.device_id = None
+        self.device_name = None
+        self.input_sample_rate = None
+        self.input_channels = None
+        self.dtype = np.float32
+        
+        # Callback monitoring
+        self.callback_count = 0
+        self.received_samples_total = 0
+        self.last_sample_report_time = 0
+        self.downsample_logged = False
+        
         # Ring buffer for audio samples - stores (timestamp, audio_data) tuples
-        buffer_size = int(self.sample_rate * RING_BUFFER_SECONDS)
+        buffer_size = int(self.target_sample_rate * RING_BUFFER_SECONDS)
         self.ring_buffer = deque(maxlen=buffer_size)
         self.buffer_lock = threading.Lock()
         self.recording_start_time = None
         
-        logger.info(f"AudioRecorder initialized: {self.sample_rate}Hz, {buffer_size} samples buffer")
+        # Auto-detect and configure audio device
+        self._auto_configure_audio()
         
+        logger.info(f"AudioRecorder initialized: target {self.target_sample_rate}Hz/{self.target_channels}ch, buffer {buffer_size} samples")
+        
+    def _auto_configure_audio(self):
+        """Auto-detect optimal input device and sample rate with fallback"""
+        logger.info("Auto-configuring audio device...")
+        
+        # Get all input devices
+        try:
+            devices = sd.query_devices()
+            input_devices = [(i, dev) for i, dev in enumerate(devices) 
+                           if dev['max_input_channels'] > 0]
+            
+            if not input_devices:
+                raise Exception("No input devices found")
+            
+            logger.debug(f"Found {len(input_devices)} input devices")
+            
+        except Exception as e:
+            logger.error(f"Failed to query audio devices: {e}")
+            raise
+        
+        # Priority order for sample rates
+        sample_rates = [48000, 44100, 32000, 16000]
+        
+        # Priority order for devices (external mic > built-in > others)
+        def device_priority(device_info):
+            name = device_info[1]['name'].lower()
+            if 'microphone' in name or 'mic' in name:
+                return 0  # Highest priority
+            elif 'built-in' in name or 'internal' in name:
+                return 1  # Medium priority
+            else:
+                return 2  # Lower priority
+        
+        input_devices.sort(key=device_priority)
+        
+        # Try each device with each sample rate
+        for device_idx, device_info in input_devices:
+            device_name = device_info['name']
+            max_channels = int(device_info['max_input_channels'])
+            
+            for sample_rate in sample_rates:
+                for channels in [min(2, max_channels), 1]:  # Try stereo first, then mono
+                    try:
+                        # Test if we can open the stream
+                        test_stream = sd.InputStream(
+                            device=device_idx,
+                            samplerate=sample_rate,
+                            channels=channels,
+                            dtype=self.dtype
+                        )
+                        test_stream.close()
+                        
+                        # Success! Use these settings
+                        self.device_id = device_idx
+                        self.device_name = device_name
+                        self.input_sample_rate = sample_rate
+                        self.input_channels = channels
+                        
+                        logger.info(f"Selected device: '{device_name}' (ID: {device_idx})")
+                        logger.info(f"Input settings: {sample_rate}Hz, {channels} channels, {self.dtype}")
+                        
+                        if sample_rate != self.target_sample_rate:
+                            logger.info(f"Will downsample from {sample_rate}Hz to {self.target_sample_rate}Hz")
+                        if channels > self.target_channels:
+                            logger.info(f"Will convert from {channels} channels to {self.target_channels} channel(s)")
+                        
+                        return
+                        
+                    except Exception as e:
+                        logger.debug(f"Device '{device_name}' failed at {sample_rate}Hz/{channels}ch: {e}")
+                        continue
+        
+        # If we get here, no device worked
+        device_list = [f"'{dev[1]['name']}' (ID: {dev[0]})" for dev in input_devices[:5]]
+        raise Exception(
+            f"Failed to configure any audio device. Tried devices: {', '.join(device_list)} "
+            f"with sample rates: {sample_rates}"
+        )
+    
+    def _convert_to_target_format(self, audio_data: np.ndarray) -> np.ndarray:
+        """Convert input audio to target format (16kHz mono int16)"""
+        # Convert from float32 to appropriate range if needed
+        if audio_data.dtype == np.float32:
+            # Assume float32 is in [-1, 1] range
+            audio_data = audio_data.astype(np.float32)
+        
+        # Handle multi-channel to mono conversion
+        if len(audio_data.shape) > 1 and audio_data.shape[1] > 1:
+            # Convert stereo/multi-channel to mono by averaging
+            audio_data = np.mean(audio_data, axis=1)
+        elif len(audio_data.shape) > 1:
+            # Single channel but 2D array
+            audio_data = audio_data.flatten()
+        
+        # Downsample if needed
+        if self.input_sample_rate != self.target_sample_rate:
+            # Calculate rational downsampling factors
+            gcd = np.gcd(self.target_sample_rate, self.input_sample_rate)
+            up_factor = self.target_sample_rate // gcd
+            down_factor = self.input_sample_rate // gcd
+            
+            # Perform resampling
+            audio_data = resample_poly(audio_data, up_factor, down_factor)
+            
+            # Log conversion info once
+            if not self.downsample_logged:
+                logger.debug(f"Downsampling: {self.input_sample_rate}Hz -> {self.target_sample_rate}Hz (factors: {up_factor}/{down_factor})")
+                logger.debug(f"Audio shape conversion: {len(audio_data)} samples after resampling")
+                self.downsample_logged = True
+        
+        # Convert to int16 for final output
+        if audio_data.dtype != np.int16:
+            # Scale float to int16 range
+            if audio_data.dtype in [np.float32, np.float64]:
+                audio_data = (audio_data * 32767).astype(np.int16)
+            else:
+                audio_data = audio_data.astype(np.int16)
+        
+        return audio_data
+    
     def record_audio(self):
-        """Record audio into ring buffer (lightweight producer)"""
+        """Record audio into ring buffer with monitoring (lightweight producer)"""
         
         def callback(indata, frames, time, status):
             if status:
                 logger.warning(f"Audio callback status: {status}")
             
-            if not self.stop_event.is_set():
-                # Only copy and timestamp - no heavy processing in callback
+            if self.stop_event.is_set():
+                return
+            
+            self.callback_count += 1
+            
+            # Log callback details for first few calls
+            if self.callback_count <= 3:
+                logger.debug(f"Callback #{self.callback_count}: indata.shape={indata.shape}, dtype={indata.dtype}, frames={frames}")
+            
+            try:
+                # Convert audio to target format (downsampling, mono conversion, etc.)
                 current_time = time.inputBufferAdcTime
-                audio_copy = indata.copy().flatten()  # Flatten for easier handling
+                processed_audio = self._convert_to_target_format(indata.copy())
                 
+                # Update sample count for monitoring
+                self.received_samples_total += len(processed_audio)
+                
+                # Report sample statistics every second
+                current_report_time = int(current_time)
+                if current_report_time > self.last_sample_report_time:
+                    logger.info(f"Received samples: {self.received_samples_total} (callback #{self.callback_count})")
+                    self.last_sample_report_time = current_report_time
+                
+                # Store in ring buffer with timestamps
                 with self.buffer_lock:
-                    # Store each sample with precise timestamp
-                    for i, sample in enumerate(audio_copy):
-                        sample_timestamp = current_time + (i / self.sample_rate)
+                    for i, sample in enumerate(processed_audio):
+                        sample_timestamp = current_time + (i / self.target_sample_rate)
                         self.ring_buffer.append((sample_timestamp, sample))
+                        
+            except Exception as e:
+                logger.error(f"Callback processing error: {e}")
         
         print("Recording started. Press Enter to stop...")
         print("Real-time transcription will appear below:")
@@ -112,16 +270,21 @@ class AudioRecorder:
         self.recording_start_time = time.time()
         logger.info(f"Audio recording started at {self.recording_start_time}")
         
-        with sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            callback=callback,
-            dtype=np.int16
-        ):
-            while not self.stop_event.is_set():
-                time.sleep(0.1)
+        try:
+            with sd.InputStream(
+                device=self.device_id,
+                samplerate=self.input_sample_rate,
+                channels=self.input_channels,
+                callback=callback,
+                dtype=self.dtype
+            ):
+                while not self.stop_event.is_set():
+                    time.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Recording stream error: {e}")
+            raise
         
-        logger.info("Audio recording stopped")
+        logger.info(f"Audio recording stopped. Total samples received: {self.received_samples_total}")
     
     def start_recording(self):
         """Start recording in a separate thread"""
@@ -146,6 +309,7 @@ class AudioRecorder:
         """Extract audio chunk from ring buffer by timestamp"""
         with self.buffer_lock:
             if not self.ring_buffer:
+                logger.warning(f"Ring buffer is empty when extracting chunk {start_ts:.1f}-{end_ts:.1f}s")
                 return None
             
             chunk_samples = []
@@ -154,8 +318,11 @@ class AudioRecorder:
                     chunk_samples.append(sample)
             
             if chunk_samples:
+                logger.debug(f"Extracted {len(chunk_samples)} samples for chunk {start_ts:.1f}-{end_ts:.1f}s")
                 return np.array(chunk_samples, dtype=np.int16)
-            return None
+            else:
+                logger.warning(f"No samples found in ring buffer for time range {start_ts:.1f}-{end_ts:.1f}s")
+                return None
     
     def get_recording_duration(self) -> float:
         """Get current recording duration"""
@@ -303,7 +470,7 @@ class SpeechTranscriber:
             with wave.open(temp_filename, 'w') as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
-                wf.setframerate(16000)
+                wf.setframerate(16000)  # Always use 16kHz for transcription API
                 wf.writeframes(chunk.audio_data.tobytes())
             
             # Transcribe the chunk
