@@ -383,9 +383,10 @@ class AudioRecorder:
 class AudioChunker:
     """Chunker Thread - extracts 20s/2s overlap chunks from ring buffer using sample indices"""
     
-    def __init__(self, recorder: AudioRecorder, transcribe_queue: Queue):
+    def __init__(self, recorder: AudioRecorder, transcribe_queue: Queue, flushed_event: threading.Event):
         self.recorder = recorder
         self.transcribe_queue = transcribe_queue
+        self.flushed_event = flushed_event  # Event to signal tail flush completion
         self.chunk_duration = 20  # seconds
         self.overlap_duration = 2  # seconds
         self.chunk_interval = self.chunk_duration - self.overlap_duration  # 18s
@@ -485,29 +486,39 @@ class AudioChunker:
         # EXIT SEQUENCE: Mandatory tail flush before sentinel injection
         logger.info("Chunker exiting main loop, executing mandatory tail flush...")
         
-        # Create tail chunk from any remaining samples
+        # Log tail calculation window for debugging
+        final_sample_index = self.recorder.get_current_sample_index()
+        logger.info(f"Tail window check: last_end={self.last_chunk_end_index}, next_index={final_sample_index}")
+        
+        # Create tail chunk from any remaining samples  
         tail_chunk = self.create_tail_chunk_mandatory()
         if tail_chunk:
-            # Tail chunk found - inject it before sentinel
+            # Tail chunk found - inject it before sentinels
             try:
                 self.transcribe_queue.put(tail_chunk, timeout=2.0)
-                logger.info(f"✓ Tail chunk {tail_chunk.chunk_id} injected to transcription queue")
+                logger.info(f"✓ Tail chunk {tail_chunk.chunk_id} enqueued")
             except:
                 logger.error(f"✗ Failed to inject tail chunk {tail_chunk.chunk_id}")
         else:
             logger.info("No tail chunk created (no remaining samples or below threshold)")
         
-        # Inject stop sentinel after tail chunk
-        try:
-            self.transcribe_queue.put(STOP_SENTINEL, timeout=2.0)
-            logger.info("✓ STOP_SENTINEL injected after tail flush")
-        except:
-            logger.error("✗ Failed to inject STOP_SENTINEL")
+        # Inject worker_count number of stop sentinels for all workers
+        sentinel_count = MAX_TRANSCRIBE_WORKERS  # Number of worker threads
+        logger.info(f"Injecting {sentinel_count} STOP_SENTINELs for workers")
         
-        logger.info("AudioChunker loop terminated with tail flush completed")
+        for i in range(sentinel_count):
+            try:
+                self.transcribe_queue.put(STOP_SENTINEL, timeout=2.0)
+                logger.debug(f"✓ STOP_SENTINEL {i+1}/{sentinel_count} injected")
+            except:
+                logger.error(f"✗ Failed to inject STOP_SENTINEL {i+1}/{sentinel_count}")
+        
+        # Signal completion of tail flush and sentinel injection
+        self.flushed_event.set()
+        logger.info("✓ Chunker flush completed - flushed_event signaled")
     
     def create_tail_chunk_mandatory(self) -> Optional[AudioChunk]:
-        """Create mandatory tail chunk from remaining samples (always executes on stop)"""
+        """Create mandatory tail chunk from remaining samples (with TAIL_MIN_SEC=0.0 support)"""
         current_sample_index = self.recorder.get_current_sample_index()
         tail_start_index = self.last_chunk_end_index  # 0 if no regular chunks emitted
         tail_end_index = current_sample_index
@@ -519,13 +530,19 @@ class AudioChunker:
         # Check minimum threshold (default 0.0 = save any remainder)
         min_samples = int(TAIL_MIN_SEC * self.recorder.target_sample_rate)
         
-        if tail_samples < min_samples:
-            logger.info(f"Tail chunk below threshold: samples={tail_samples} sec={tail_duration:.2f} < {TAIL_MIN_SEC}s, skipping")
+        logger.info(f"Tail calculation: start={tail_start_index}, end={tail_end_index}, samples={tail_samples}, duration={tail_duration:.2f}s, min_threshold={TAIL_MIN_SEC}s ({min_samples} samples)")
+        
+        # CRITICAL: With TAIL_MIN_SEC=0.0, save ANY remainder > 0 samples
+        if tail_samples <= 0:
+            logger.info("No tail samples to flush (tail_samples <= 0)")
             return None
         
-        if tail_samples <= 0:
-            logger.info("No tail samples to flush")
+        # TAIL_MIN_SEC=0.0 means min_samples=0, so any tail_samples > 0 should be saved
+        if tail_samples < min_samples:
+            logger.info(f"Tail chunk below threshold: samples={tail_samples} < {min_samples} (TAIL_MIN_SEC={TAIL_MIN_SEC}s), skipping")
             return None
+        
+        logger.info(f"✓ Tail chunk qualifies: {tail_samples} samples >= {min_samples} threshold")
         
         # Extract tail audio data
         tail_audio_data = self.recorder.extract_chunk_by_index(tail_start_index, tail_end_index)
@@ -551,6 +568,7 @@ class AudioChunker:
         tail_chunk.is_tail = True
         
         logger.info(f"Flushing tail chunk: samples={tail_samples} sec={tail_duration:.2f} start={tail_start_index} end={tail_end_index}")
+        logger.info(f"✓ Tail chunk created successfully: ID={tail_chunk.chunk_id}")
         return tail_chunk
 
 class SpeechTranscriber:
@@ -567,7 +585,10 @@ class SpeechTranscriber:
         self.results_store_lock = threading.Lock()
         self.stored_results_count = 0
         
-        self.chunker = AudioChunker(self.recorder, self.transcribe_queue)
+        # Synchronization events
+        self.chunker_flushed_event = threading.Event()  # Chunker tail flush completion
+        
+        self.chunker = AudioChunker(self.recorder, self.transcribe_queue, self.chunker_flushed_event)
         self.executor = ThreadPoolExecutor(max_workers=MAX_TRANSCRIBE_WORKERS)
         self.printer = RealtimePrinter(self.realtime_queue)
         self.transcription_results: List[TranscriptionResult] = []
@@ -1038,21 +1059,36 @@ def run(self):
             # Wait for Enter key to stop recording
             input()
             
-            # Stop pipeline components in reverse order
+            # STRICT STOP SEQUENCE: Ensure proper completion order
             print("\nStopping recording pipeline...")
+            
+            # Step 1: Stop chunker (will trigger tail flush when loop exits)
+            logger.info("Step 1: Stopping chunker...")
             self.chunker.stop()
+            
+            # Step 2: Stop recorder and wait for producer thread completion
+            logger.info("Step 2: Stopping recorder and waiting for producer completion...")
             self.recorder.stop_recording()
-            recording_thread.join(timeout=5)
+            if recording_thread:
+                recording_thread.join(timeout=5)
+                logger.info("✓ Producer thread completed")
             
-            # Note: Tail chunk handling is now done automatically in chunker loop exit sequence
-            # The chunker will flush any remaining samples and inject STOP_SENTINEL
-            logger.info("Waiting for chunker to complete tail flush and sentinel injection...")
+            # Step 3: Wait for chunker tail flush and sentinel injection completion
+            logger.info("Step 3: Waiting for chunker tail flush completion...")
+            if self.chunker_flushed_event.wait(timeout=10):
+                logger.info("✓ Chunker flush confirmed")
+            else:
+                logger.error("✗ Chunker flush timeout - proceeding anyway")
             
-            # Wait for chunker to complete (includes tail flush + sentinel)
-            # The chunker loop now handles tail flushing before STOP_SENTINEL injection
+            # Step 4: Wait for transcription workers to complete
+            logger.info("Step 4: Waiting for transcription workers completion...")
             
-            # Collect final results
+            # Step 5: Collect final results after workers complete
+            logger.info("Step 5: Collecting final results...")
             final_results = self.collect_final_results()
+            
+            # Step 6: Stop printer
+            logger.info("Step 6: Stopping printer...")
             self.printer.stop()
             
             logger.info("Pipeline stopped")
