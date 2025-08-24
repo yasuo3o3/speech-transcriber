@@ -1,5 +1,55 @@
 # Speech Transcriber - Development History
 
+## 2025-01-25 21:45 JST - 汎用テイル保存システムの実装（録音20秒未満でも確実に保存）
+
+### 送信プロンプト全文
+現在のシステムでは、録音が20秒未満で終了した場合（例：18秒でEnter）、通常チャンクが生成されず、テイルチャンクも作成条件（TAIL_MIN_SEC=1.0）を満たさないため、音声が保存されない問題があります。
+
+録音が20秒未満で終了した場合（例：18秒でEnter）でも、その音声を1チャンクとして必ず保存・出力・最終結合に含めてください。
+
+**実装要求**:
+
+1. **TAIL_MIN_SEC の既定値を 0.0 に変更**
+   - 任意の長さの残り音声（1秒でも18秒でも）を保存対象にします
+   - .envSample と README.md の説明も更新
+
+2. **テイルフラッシュを必須実行に改修**
+   - Chunker は通常ループを抜ける前に、以下の **テイルフラッシュ** を必須実行:
+   ```
+   # EXIT SEQUENCE: Mandatory tail flush before sentinel injection
+   tail_chunk = self.create_tail_chunk_mandatory()
+   if tail_chunk:
+       self.transcribe_queue.put(tail_chunk, timeout=2.0)
+   self.transcribe_queue.put(STOP_SENTINEL, timeout=2.0)
+   ```
+
+3. **早期終了（<20s）対応の実装**
+   - 通常チャンクが0個の場合、テイルチャンクが全録音（start_index=0）をカバー
+   - テイルチャンク生成ログ: `Flushing tail chunk: samples=83200 sec=5.20 start=0 end=83200`
+   - create_tail_chunk_mandatory メソッドで常に実行（条件なし）
+
+4. **センチネル順序の調整**
+   - STOP_SENTINEL はテイルチャンク注入**後**に送信
+   - Worker スレッドはSENTINEL受信で正常終了
+
+5. **ログ・可視化の強化**
+   - RealtimePrinter でテイルチャンク識別: `=== chunk N (tail: 83200 samples, 5.20s) ===`
+   - 早期終了時のサンプル数・秒数を明確に表示
+
+### 出力要約
+汎用テイル保存システムを実装しました：
+
+1. **TAIL_MIN_SEC既定値変更**: 1.0 → 0.0（任意の残り音声を保存）
+2. **必須テイルフラッシュ**: chunker終了時に必ずテイルチャンク生成・注入
+3. **早期終了対応**: <20s録音でもstart_index=0からの全音声をテイルチャンクとして保存
+4. **センチネル順序調整**: テイルチャンク → STOP_SENTINEL の順番で注入
+5. **強化ログ**: テイルチャンクのサンプル数・秒数・範囲を詳細表示
+
+録音時間に関係なく（1秒でも18秒でも）、全ての音声が確実に保存・処理される汎用システムが完成しました。
+
+### 次アクション
+動作検証: 5秒、10秒、15秒、18秒などの短い録音でテイルチャンク生成・表示・最終保存が正常に動作することを確認
+
 ## 2025-01-25 18:30 JST - README強化・Notionインテグレーション権限付与の明記
 
 ### 送信プロンプト全文

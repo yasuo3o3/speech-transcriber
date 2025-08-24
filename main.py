@@ -27,7 +27,7 @@ load_dotenv()
 NORMALIZE_TECH_TERMS = os.getenv('NORMALIZE_TECH_TERMS', 'true').lower() == 'true'
 POSTPROCESS_TEST_MODE = os.getenv('POSTPROCESS_TEST_MODE', 'false').lower() == 'true'
 AI_DEDUP_MODE = os.getenv('AI_DEDUP_MODE', 'boundary_only').lower()  # boundary_only/off
-TAIL_MIN_SEC = float(os.getenv('TAIL_MIN_SEC', '1.0'))  # Minimum seconds for tail chunk
+TAIL_MIN_SEC = float(os.getenv('TAIL_MIN_SEC', '0.0'))  # Minimum seconds for tail chunk (0.0 = save any remainder)
 POSTPROCESS_MODEL = os.getenv('POSTPROCESS_MODEL', 'gpt-4o-mini')  # Model for final correction
 
 # Pipeline configuration
@@ -42,6 +42,9 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger('SpeechTranscriber')
+
+# Stop sentinel for worker threads
+STOP_SENTINEL = object()
 
 @dataclass
 class AudioChunk:
@@ -478,19 +481,50 @@ class AudioChunker:
             else:
                 # Wait for more samples
                 time.sleep(0.5)
+        
+        # EXIT SEQUENCE: Mandatory tail flush before sentinel injection
+        logger.info("Chunker exiting main loop, executing mandatory tail flush...")
+        
+        # Create tail chunk from any remaining samples
+        tail_chunk = self.create_tail_chunk_mandatory()
+        if tail_chunk:
+            # Tail chunk found - inject it before sentinel
+            try:
+                self.transcribe_queue.put(tail_chunk, timeout=2.0)
+                logger.info(f"✓ Tail chunk {tail_chunk.chunk_id} injected to transcription queue")
+            except:
+                logger.error(f"✗ Failed to inject tail chunk {tail_chunk.chunk_id}")
+        else:
+            logger.info("No tail chunk created (no remaining samples or below threshold)")
+        
+        # Inject stop sentinel after tail chunk
+        try:
+            self.transcribe_queue.put(STOP_SENTINEL, timeout=2.0)
+            logger.info("✓ STOP_SENTINEL injected after tail flush")
+        except:
+            logger.error("✗ Failed to inject STOP_SENTINEL")
+        
+        logger.info("AudioChunker loop terminated with tail flush completed")
     
-    def create_tail_chunk(self) -> Optional[AudioChunk]:
-        """Create final tail chunk from remaining samples"""
+    def create_tail_chunk_mandatory(self) -> Optional[AudioChunk]:
+        """Create mandatory tail chunk from remaining samples (always executes on stop)"""
         current_sample_index = self.recorder.get_current_sample_index()
-        tail_start_index = self.last_chunk_end_index
+        tail_start_index = self.last_chunk_end_index  # 0 if no regular chunks emitted
         tail_end_index = current_sample_index
         
-        # Calculate duration and check minimum threshold
+        # Calculate tail samples and duration
         tail_samples = tail_end_index - tail_start_index
-        tail_duration = tail_samples / self.recorder.target_sample_rate
+        tail_duration = tail_samples / self.recorder.target_sample_rate if self.recorder.target_sample_rate > 0 else 0
         
-        if tail_duration < TAIL_MIN_SEC:
-            logger.info(f"Tail chunk too short: {tail_duration:.1f}s < {TAIL_MIN_SEC}s, skipping")
+        # Check minimum threshold (default 0.0 = save any remainder)
+        min_samples = int(TAIL_MIN_SEC * self.recorder.target_sample_rate)
+        
+        if tail_samples < min_samples:
+            logger.info(f"Tail chunk below threshold: samples={tail_samples} sec={tail_duration:.2f} < {TAIL_MIN_SEC}s, skipping")
+            return None
+        
+        if tail_samples <= 0:
+            logger.info("No tail samples to flush")
             return None
         
         # Extract tail audio data
@@ -500,7 +534,7 @@ class AudioChunker:
             logger.warning(f"No tail audio data for range [{tail_start_index}-{tail_end_index})")
             return None
         
-        # Create tail chunk
+        # Create tail chunk with proper metadata
         self.chunk_id_counter += 1
         capture_time = time.time()
         
@@ -513,7 +547,10 @@ class AudioChunker:
             capture_end=capture_time
         )
         
-        logger.info(f"Flushing tail chunk: {tail_duration:.1f}s (start={tail_start_index}, end={tail_end_index})")
+        # Mark as tail chunk for display
+        tail_chunk.is_tail = True
+        
+        logger.info(f"Flushing tail chunk: samples={tail_samples} sec={tail_duration:.2f} start={tail_start_index} end={tail_end_index}")
         return tail_chunk
 
 class SpeechTranscriber:
@@ -631,7 +668,20 @@ class SpeechTranscriber:
             while True:
                 try:
                     chunk = self.transcribe_queue.get(timeout=1.0)
+                    
+                    # Check for stop sentinel
+                    if chunk == STOP_SENTINEL:
+                        logger.info("Worker received STOP_SENTINEL, exiting")
+                        self.transcribe_queue.task_done()
+                        break
+                    
+                    # Process regular chunk
                     result = self.transcribe_chunk_async(chunk)
+                    
+                    # Copy tail chunk flag if present
+                    if hasattr(chunk, 'is_tail') and chunk.is_tail:
+                        result.is_tail = True
+                        logger.info(f"Processed tail chunk {chunk.chunk_id}: [{chunk.start_index}-{chunk.end_index})")
                     
                     # Fan-out: Send result to both realtime printer and results store
                     self.realtime_queue.put(result)  # For RealtimePrinter
@@ -648,6 +698,11 @@ class SpeechTranscriber:
                     continue
                 except Exception as e:
                     logger.error(f"Transcription worker error: {e}")
+                    # Still mark task as done even on error
+                    try:
+                        self.transcribe_queue.task_done()
+                    except ValueError:
+                        pass  # task_done() called more times than get()
         
         # Start worker threads
         for i in range(MAX_TRANSCRIBE_WORKERS):
@@ -764,17 +819,47 @@ class RealtimePrinter:
             complete_text = self.sentence_buffer[:last_ending_pos + 1]
             remaining_text = self.sentence_buffer[last_ending_pos + 1:]
             
-            # Check if this is a tail chunk (last chunk)
-            chunk_type = " (tail)" if hasattr(result, 'is_tail') and result.is_tail else ""
-            print(f"\n=== chunk {result.chunk_id}{chunk_type} [{result.start_ts:.1f}s~{result.end_ts:.1f}s] ===")
+            # Check if this is a tail chunk (last chunk) and log accordingly
+            if hasattr(result, 'start_index') and hasattr(result, 'end_index'):
+                # Extract chunk info for enhanced logging
+                chunk_samples = result.end_index - result.start_index
+                chunk_duration = chunk_samples / 16000.0 if chunk_samples > 0 else 0
+                
+                # Determine chunk type for display
+                if hasattr(result, 'is_tail') and result.is_tail:
+                    chunk_type = f" (tail: {chunk_samples} samples, {chunk_duration:.2f}s)"
+                    logger.info(f"Displaying tail chunk {result.chunk_id}: [{result.start_index}-{result.end_index}) = {chunk_duration:.2f}s")
+                else:
+                    chunk_type = f" ({chunk_samples} samples, {chunk_duration:.2f}s)"
+                
+                print(f"\n=== chunk {result.chunk_id}{chunk_type} ===")
+            else:
+                # Fallback display if chunk metadata is missing
+                chunk_type = " (tail)" if hasattr(result, 'is_tail') and result.is_tail else ""
+                print(f"\n=== chunk {result.chunk_id}{chunk_type} [{result.start_ts:.1f}s~{result.end_ts:.1f}s] ===")
             print(complete_text)
             
             self.sentence_buffer = remaining_text
         else:
             # No sentence ending - print immediately (avoid delay)
-            # Check if this is a tail chunk (last chunk)
-            chunk_type = " (tail)" if hasattr(result, 'is_tail') and result.is_tail else ""
-            print(f"\n=== chunk {result.chunk_id}{chunk_type} [{result.start_ts:.1f}s~{result.end_ts:.1f}s] ===")
+            # Check if this is a tail chunk (last chunk) and log accordingly
+            if hasattr(result, 'start_index') and hasattr(result, 'end_index'):
+                # Extract chunk info for enhanced logging
+                chunk_samples = result.end_index - result.start_index
+                chunk_duration = chunk_samples / 16000.0 if chunk_samples > 0 else 0
+                
+                # Determine chunk type for display
+                if hasattr(result, 'is_tail') and result.is_tail:
+                    chunk_type = f" (tail: {chunk_samples} samples, {chunk_duration:.2f}s)"
+                    logger.info(f"Displaying tail chunk {result.chunk_id}: [{result.start_index}-{result.end_index}) = {chunk_duration:.2f}s")
+                else:
+                    chunk_type = f" ({chunk_samples} samples, {chunk_duration:.2f}s)"
+                
+                print(f"\n=== chunk {result.chunk_id}{chunk_type} ===")
+            else:
+                # Fallback display if chunk metadata is missing
+                chunk_type = " (tail)" if hasattr(result, 'is_tail') and result.is_tail else ""
+                print(f"\n=== chunk {result.chunk_id}{chunk_type} [{result.start_ts:.1f}s~{result.end_ts:.1f}s] ===")
             print(result.text)
             self.sentence_buffer = ""  # Clear buffer
         
@@ -959,16 +1044,12 @@ def run(self):
             self.recorder.stop_recording()
             recording_thread.join(timeout=5)
             
-            # Create and process tail chunk before collecting final results
-            tail_chunk = self.chunker.create_tail_chunk()
-            if tail_chunk:
-                # Mark as tail chunk for display
-                tail_chunk.is_tail = True
-                try:
-                    self.transcribe_queue.put(tail_chunk, timeout=2.0)
-                    logger.info(f"Tail chunk queued: chunk {tail_chunk.chunk_id}")
-                except Exception as e:
-                    logger.error(f"Failed to queue tail chunk: {e}")
+            # Note: Tail chunk handling is now done automatically in chunker loop exit sequence
+            # The chunker will flush any remaining samples and inject STOP_SENTINEL
+            logger.info("Waiting for chunker to complete tail flush and sentinel injection...")
+            
+            # Wait for chunker to complete (includes tail flush + sentinel)
+            # The chunker loop now handles tail flushing before STOP_SENTINEL injection
             
             # Collect final results
             final_results = self.collect_final_results()
