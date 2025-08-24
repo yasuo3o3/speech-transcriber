@@ -238,9 +238,33 @@ speech-transcriber/
 
 プロンプトの言語を変更したい場合は `main.py` 冒頭の `MSG_*` 定数を書き換えるだけでよい。英語例はコメント（`EN: ...`）を参照。
 
+### 非同期パイプライン（v2.0対応）
+
+**v2.0** では音声欠落を防ぐため、録音とAPI呼び出しを完全に分離した非同期パイプライン設計に変更されました。
+
+**パイプライン構成:**
+1. **Ring Buffer Producer** (AudioRecorder) - 音声を軽量コールバックでリングバッファに蓄積
+2. **Chunker Thread** (AudioChunker) - 20s/2s overlapの連続タイムライン管理、チャンク切り出し
+3. **Consumer ThreadPool** - 文字起こしAPIを並列実行
+4. **Real-time Printer** - start_ts整列で順序保証、文末優先の表示制御
+5. **Gap Detection** - 音声連続性の監視とログ出力
+
+**新しい環境変数:**
+```env
+# 非同期処理設定
+MAX_TRANSCRIBE_WORKERS=2          # 並列文字起こし数
+TRANSCRIBE_QUEUE_MAX_SIZE=10      # キュー最大サイズ
+RING_BUFFER_SECONDS=300          # リングバッファ保持秒数
+```
+
+**ログ機能:**
+- 各チャンクに capture_start/capture_end/api_start/api_end/printed_at を記録
+- 連続チャンクの capture_start 差が (chunk_sec - overlap_sec) ±0.5s から外れたら WARNING ログ
+- API レスポンス時間とキューサイズを監視
+
 ### デバッグモード
 
-エラーの詳細を確認したい場合は、コンソール出力を注意深く確認してください。各操作の成功/失敗が明確に表示されます。
+エラーの詳細を確認したい場合は、コンソール出力を注意深く確認してください。各操作の成功/失敗が明確に表示されます。v2.0では詳細なタイミングログが追加されています。
 
 ## ライセンス
 
@@ -250,11 +274,14 @@ speech-transcriber/
 
 ### コード構成
 
-- \`AudioRecorder\`: 音声録音を管理
-- \`SpeechTranscriber\`: メイン制御クラス
+**v2.0 非同期パイプライン:**
+- \`AudioRecorder\`: Ring Buffer型Producer（軽量コールバック録音）
+- \`AudioChunker\`: チャンク切り出しThread（20s/2s overlap管理）
+- \`RealtimePrinter\`: 順序保証とsentence-end優先の出力制御
+- \`SpeechTranscriber\`: 非同期パイプライン制御とThreadPoolExecutor管理
 - \`DiscordClient\`: Discord Webhook送信
-- \`NotionClient\`: Notion API連携
-- \`utils.py\`: テキスト整形とユーティリティ
+- \`NotionClient\`: Notion API連携（長文対応）
+- \`utils.py\`: テキスト整形、正規化、AI補正、重複除去
 
 ### セキュリティ
 

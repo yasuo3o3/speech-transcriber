@@ -127,3 +127,82 @@ def postprocess_with_ai(text: str, context_hint: str = "", test_mode: bool = Fal
 {gpt4o_result}"""
     else:
         return get_ai_correction("gpt-4o")
+
+def format_realtime_text(text: str) -> str:
+    """Format text for real-time display with sentence-end priority"""
+    if not text.strip():
+        return text
+    
+    # Check for sentence endings
+    sentence_endings = ['。', '！', '？', '.', '!', '?']
+    
+    # Find the last sentence ending
+    last_ending_pos = -1
+    for ending in sentence_endings:
+        pos = text.rfind(ending)
+        if pos > last_ending_pos:
+            last_ending_pos = pos
+    
+    # If sentence ending found, return up to that point (including the ending)
+    if last_ending_pos >= 0:
+        return text[:last_ending_pos + 1]
+    
+    # Otherwise, return the entire text (chunked display)
+    return text
+
+def remove_chunk_duplicates(chunks: list) -> str:
+    """Remove duplicates when combining chunks and return combined text"""
+    if not chunks:
+        return ""
+    
+    if len(chunks) == 1:
+        return chunks[0]
+    
+    combined = chunks[0]
+    
+    # Local duplicate removal - exact match at boundaries
+    for i in range(1, len(chunks)):
+        current_chunk = chunks[i]
+        
+        # Find overlapping text between end of combined and start of current
+        max_overlap = min(len(combined), len(current_chunk))
+        overlap_found = 0
+        
+        for overlap_len in range(max_overlap, 0, -1):
+            if combined[-overlap_len:] == current_chunk[:overlap_len]:
+                overlap_found = overlap_len
+                break
+        
+        # Add current chunk without the overlapping part
+        combined += current_chunk[overlap_found:]
+    
+    return combined
+
+def refine_duplicates_with_ai(text: str) -> str:
+    """Use GPT-4o to refine text and remove semantic duplicates"""
+    if not text.strip():
+        return text
+    
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    system_prompt = """音声認識テキストの重複や表記違いを自然に整理してください。
+- 同じ意味の単語や文が連続している場合は、より自然な表現に統合
+- 音声認識特有の繰り返しや言い直しを削除
+- 文脈を保ちながら読みやすく整形
+- 内容は変更せず、重複のみ整理"""
+    
+    user_prompt = f"以下のテキストの重複を整理してください：\n\n{text}"
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=4000
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"AI duplicate removal failed: {e}")
+        return text

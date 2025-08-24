@@ -586,3 +586,163 @@ README と history.md が更新されている。
 - .envSample を参考に .env ファイルを作成・設定
 - 録音テストで補正機能の動作確認
 - POSTPROCESS_TEST_MODE=true での両モデル比較テスト
+
+## 2025-01-25 21:30 JST - リアルタイム文字起こし改善：20秒ごとに文末優先でコンソール出力し、結合時に重複を整理
+
+### 送信プロンプト全文
+以下の変更を既存プロジェクトに加えてください。
+生成コードは上書きではなく必要部分を改修する形でお願いします。
+また、変更内容は prompts/history.md に日時・件名・送信プロンプト全文・出力概要・次アクションを追記してください。
+
+変更内容
+
+リアルタイム表示の改善
+
+録音中に 20秒ごとに gpt-4o-transcribe にチャンクを送信
+
+結果を逐次コンソールに表示する
+
+表示時に「文末記号（。！？）」が含まれていればそこまでを優先して出力
+
+文末記号がなければ、そのままブツ切りで出力する（遅延は発生させない）
+
+録音終了後の処理
+
+Enterで録音停止
+
+すべてのチャンクテキストを結合
+
+重複処理（チャンク結合時）
+
+ローカル処理で「前チャンク末尾」と「次チャンク冒頭」が完全一致している部分を削除
+
+さらに gpt-4o に補正依頼を行い、表記違いで同じ意味の単語が連続した場合は自然に丸める
+
+最終補正フロー
+
+ローカル辞書補正（全角→半角、技術用語表記の統一など）
+
+gpt-4o に軽く補正を依頼（句読点や重複整理など）
+
+保存フロー
+
+タイトルと概要を入力
+
+Discord に送信（タイトル＋概要）
+
+Notion に保存（タイトル＋概要＋本文）
+
+注意事項
+
+.env.example, .gitignore, README.md など既存ファイルがある場合も、必ず上書きして処理を進めてください。
+
+確認プロンプトは不要です。
+
+コミットメッセージ案
+リアルタイム文字起こし改善: 20秒ごとに文末優先でコンソール出力し、結合時に重複を整理。録音終了後は辞書補正＋GPT補正を経てDiscord/Notionに送信。既存ファイルは自動で上書き処理。
+
+### 出力概要
+- AudioRecorderクラスをリアルタイム処理に改修（20秒ごとのチャンク生成・コールバック機能追加）
+- SpeechTranscriberクラスにリアルタイム文字起こし機能を追加（transcribe_chunk_realtime メソッド）
+- utils.py に3つの新機能を実装：
+  - format_realtime_text: 文末記号優先表示
+  - remove_chunk_duplicates: ローカル重複削除
+  - refine_duplicates_with_ai: GPT-4oによる意味的重複整理
+- 最終補正フローを3段階に拡張（重複削除→ローカル正規化→AI補正）
+- runメソッドをリアルタイムフローに完全改修
+
+### 主要ファイル
+- main.py（31-87行目: AudioRecorderクラス改修、156-195行目: リアルタイム文字起こし、219-249行目: 3段階補正フロー、315-346行目: 新しい実行フロー）
+- utils.py（131-208行目: リアルタイム表示・重複削除・AI重複整理機能を追加）
+- prompts/history.md（本ログエントリを追記）
+
+### 注意点
+- 録音中は20秒ごとにリアルタイムで文字起こしを表示
+- 文末記号がある場合は文章単位で表示、なければそのまま表示
+- チャンク結合時は完全一致とAI補正の二重重複削除
+- 既存の二段補正に重複削除を追加した三段補正フローに統合
+- 従来の単発録音→一括文字起こしから連続リアルタイム処理に変更
+
+### 次アクション
+- リアルタイム文字起こしの動作テスト（20秒間隔での表示確認）
+- 文末記号優先表示の動作確認
+- チャンク重複削除とAI補正の統合テスト
+
+## 2025-01-25 [時刻不明] - 非同期パイプライン設計への完全移行（v2.0）
+
+### 送信プロンプト要旨
+1. **UnboundLocalError修正要求**: current_chunkが未定義エラーの解決
+2. **アーキテクチャ全面改修要求**: 音声欠落防止のため録音とAPI呼び出しを完全分離、非同期パイプライン設計への移行
+
+### 主要な変更内容
+
+**Ring Buffer Producer (AudioRecorder)**
+- 軽量コールバックで音声サンプルを(timestamp, sample)ペアでリングバッファに蓄積
+- 録音とAPI処理を完全分離、音声欠落を防止
+- extract_chunk メソッドでタイムスタンプ範囲指定による音声切り出し
+
+**Chunker Thread (AudioChunker)**
+- 20秒/2秒overlap の連続タイムライン管理
+- next_chunk_time による規則的なチャンク生成（20s, 40s, 60s...）
+- AudioChunk dataclass でメタデータ管理（start_ts, end_ts, audio_data）
+
+**Consumer ThreadPool**
+- TranscriptionResult dataclass設計（chunk_start_ts, api_start, api_end, text）
+- ThreadPoolExecutor による並列API処理（MAX_TRANSCRIBE_WORKERS設定）
+- キューベース非同期通信（TRANSCRIBE_QUEUE_MAX_SIZE設定）
+
+**Real-time Printer (RealtimePrinter)**
+- start_ts による厳密な時系列順序保証
+- sentence-end 記号優先の表示制御（。！？.!?改行 を検出）
+- sentence_buffer による部分表示管理
+
+**Gap Detection & Logging**
+- 各チャンクに capture_start/capture_end/api_start/api_end/printed_at 記録
+- 連続チャンクの capture_start 差分監視（±0.5s許容範囲でWARNING）
+- API応答時間とキューサイズの詳細ログ
+
+**新環境変数 (.envSample追加)**
+```
+MAX_TRANSCRIBE_WORKERS=2
+TRANSCRIBE_QUEUE_MAX_SIZE=10  
+RING_BUFFER_SECONDS=300
+```
+
+### 実装詳細
+
+**main.py完全リライト**: 
+- AudioRecorder: Ring Bufferパターン実装（collections.deque使用）
+- AudioChunker: 連続チャンク管理Thread
+- RealtimePrinter: 順序保証出力制御
+- SpeechTranscriber: 非同期パイプライン統合制御
+
+**utils.py機能拡張**:
+- 既存の二段補正（normalize_tech_terms, postprocess_with_ai）を維持
+- remove_chunk_duplicates: ローカル重複除去（完全一致境界検出）
+- refine_duplicates_with_ai: GPT-4o意味的重複整理
+
+### アーキテクチャ比較
+
+**v1.x (同期)**:
+録音開始 → 20秒待機 → 録音停止 → API呼び出し → 結果表示
+
+**v2.0 (非同期パイプライン)**:
+```
+[Ring Buffer] → [Chunker Thread] → [ThreadPool] → [Ordered Printer]
+     ↓              ↓                   ↓            ↓
+  常時録音      20s/2s overlap     並列API処理    順序保証表示
+```
+
+### テスト予定項目
+- Ring Buffer による音声連続性確保
+- 20秒/2秒 overlap チャンク生成精度
+- ThreadPool API並列処理の負荷分散  
+- Real-time Printer の順序保証と文末優先表示
+- Gap Detection による音声欠落監視
+- 最終処理（重複削除・AI補正）の統合性
+
+### 次アクション
+- README.md と history.md への変更点記録（完了）
+- 統合テストと実動作確認
+- 負荷テスト（長時間録音・高負荷API処理）
+- 長時間録音での安定性検証
