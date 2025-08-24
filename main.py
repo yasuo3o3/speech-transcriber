@@ -26,6 +26,7 @@ load_dotenv()
 # Configuration flags
 NORMALIZE_TECH_TERMS = os.getenv('NORMALIZE_TECH_TERMS', 'true').lower() == 'true'
 POSTPROCESS_TEST_MODE = os.getenv('POSTPROCESS_TEST_MODE', 'false').lower() == 'true'
+AI_DEDUP_MODE = os.getenv('AI_DEDUP_MODE', 'boundary_only').lower()  # boundary_only/off
 
 # Pipeline configuration
 MAX_TRANSCRIBE_WORKERS = int(os.getenv('MAX_TRANSCRIBE_WORKERS', '2'))
@@ -767,8 +768,8 @@ def apply_text_corrections(self, text: str, title: str, summary: str, from_chunk
     # Stage 0: Remove duplicates if combining from chunks
     if from_chunks:
         try:
-            corrected_text = refine_duplicates_with_ai(corrected_text)
-            print("✓ Applied AI duplicate removal")
+            corrected_text = refine_duplicates_with_ai(corrected_text, mode=AI_DEDUP_MODE)
+            print("✓ Applied AI boundary duplicate removal")
         except Exception as e:
             print(f"⚠ AI duplicate removal failed: {e}")
             print("Proceeding without AI duplicate removal")
@@ -866,8 +867,8 @@ def combine_and_process_results(self, results: List[TranscriptionResult]) -> str
         
         # Stage 2: AI duplicate refinement
         try:
-            refined_text = refine_duplicates_with_ai(combined_text)
-            print("✓ Applied AI duplicate removal")
+            refined_text = refine_duplicates_with_ai(combined_text, mode=AI_DEDUP_MODE)
+            print("✓ Applied AI boundary duplicate removal")
         except Exception as e:
             logger.warning(f"AI duplicate removal failed: {e}")
             refined_text = combined_text

@@ -178,19 +178,71 @@ def remove_chunk_duplicates(chunks: list) -> str:
     
     return combined
 
-def refine_duplicates_with_ai(text: str) -> str:
-    """Use GPT-4o to refine text and remove semantic duplicates"""
+def _calculate_text_similarity(text1: str, text2: str) -> float:
+    """Calculate LCS-based similarity ratio between two texts"""
+    if not text1 or not text2:
+        return 0.0
+    
+    # Simple LCS approximation using difflib
+    from difflib import SequenceMatcher
+    matcher = SequenceMatcher(None, text1, text2)
+    return matcher.ratio()
+
+def _should_skip_ai_dedup(text: str) -> tuple[bool, str]:
+    """Determine if AI deduplication should be skipped based on text patterns"""
+    if not text.strip():
+        return False, "empty_text"
+    
+    # Count digits and total characters
+    digit_count = sum(1 for c in text if c.isdigit())
+    total_chars = len(text.strip())
+    digit_ratio = digit_count / total_chars if total_chars > 0 else 0
+    
+    # Skip if high digit ratio (likely numeric sequences)
+    if digit_ratio > 0.3:
+        return True, f"high_digit_ratio_{digit_ratio:.2f}"
+    
+    # Check for repetitive patterns (simple heuristic)
+    words = text.split()
+    if len(words) > 10:
+        unique_words = set(words)
+        unique_ratio = len(unique_words) / len(words)
+        if unique_ratio < 0.3:  # Low unique word ratio
+            return True, f"low_unique_ratio_{unique_ratio:.2f}"
+    
+    return False, "pass"
+
+def refine_duplicates_with_ai(text: str, mode: str = "boundary_only") -> str:
+    """Use GPT-4o to refine text and remove boundary duplicates only (safe mode)"""
     if not text.strip():
         return text
     
-    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-    system_prompt = """音声認識テキストの重複や表記違いを自然に整理してください。
-- 同じ意味の単語や文が連続している場合は、より自然な表現に統合
-- 音声認識特有の繰り返しや言い直しを削除
-- 文脈を保ちながら読みやすく整形
-- 内容は変更せず、重複のみ整理"""
+    # Check mode setting
+    if mode == "off":
+        print("AI dedup skipped (mode=off)")
+        return text
     
-    user_prompt = f"以下のテキストの重複を整理してください：\n\n{text}"
+    # Auto-bypass check
+    should_skip, reason = _should_skip_ai_dedup(text)
+    if should_skip:
+        print(f"AI dedup skipped (pattern heuristic: {reason})")
+        return text
+    
+    original_length = len(text)
+    client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    
+    # Strict boundary-only prompt
+    system_prompt = """以下のテキストを、意味の要約・圧縮・言い換えを一切行わずに処理してください。
+タスクは1点のみ：
+- チャンク結合時に生じる「末尾と先頭の重複」だけを取り除く（完全一致または2〜20文字程度の軽微な表記差のみ）。
+禁止事項：
+- 数列や箇条書き、反復表現の短文化（例：「1,2,3, …」を「連続した数字」と要約）は禁止。
+- 非重複部分の削除、語順変更、文意の改変は一切禁止。
+- 改行は原文の文末記号（。！？）を尊重し、過剰に詰めない。
+出力は、入力本文と同じ内容を維持したまま、境界重複部分だけを取り除いたテキストとする。
+返答は本文のみ（前置き/説明/囲みテキスト不要）。"""
+    
+    user_prompt = f"以下のテキストの境界重複のみを取り除いてください：\n\n{text}"
     
     try:
         response = client.chat.completions.create(
@@ -199,10 +251,25 @@ def refine_duplicates_with_ai(text: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.1,
+            temperature=0.05,  # Lower temperature for consistency
             max_tokens=4000
         )
-        return response.choices[0].message.content.strip()
+        
+        ai_result = response.choices[0].message.content.strip()
+        
+        # Safety check: measure changes
+        result_length = len(ai_result)
+        length_change_ratio = abs(result_length - original_length) / original_length if original_length > 0 else 0
+        similarity_ratio = _calculate_text_similarity(text, ai_result)
+        
+        # Revert if changes are too significant
+        if similarity_ratio < 0.97 or length_change_ratio > 0.05:
+            print(f"AI dedup reverted (delta={length_change_ratio:.3f}, lcs={similarity_ratio:.3f})")
+            return text
+        
+        print(f"Applied AI boundary dedup (chars: {original_length} → {result_length})")
+        return ai_result
+        
     except Exception as e:
         print(f"AI duplicate removal failed: {e}")
         return text

@@ -228,7 +228,7 @@ class NotionClient:
         return False
     
     def create_page(self, title: str, summary: str, full_text: str) -> bool:
-        """Create a new page in Notion with the transcription using new long-text handling"""
+        """Create a new page in Notion with proper block structure: H1(title) -> H2(概要) -> P(summary) -> H2(全文) -> P(text)"""
         if not self.client:
             print("Error: NOTION_TOKEN not configured")
             return False
@@ -237,8 +237,8 @@ class NotionClient:
             print("Error: NOTION_PARENT_PAGE_ID not configured")
             return False
         
-        # Build header blocks (summary section)
-        header_blocks = self._build_header_blocks(summary)
+        # Build structured header blocks with proper separation
+        header_blocks = self._build_structured_header_blocks(summary)
         
         # Process full text into paragraph blocks with chunking
         text_chunks = self.chunk_paragraphs_for_notion(full_text)
@@ -251,27 +251,29 @@ class NotionClient:
             title, header_blocks, body_blocks, self.parent_page_id
         )
     
-    def _build_header_blocks(self, summary: str) -> list[dict]:
-        """Build header blocks for page (概要 section)"""
+    def _build_structured_header_blocks(self, summary: str) -> list[dict]:
+        """Build properly structured header blocks with clear separation"""
         blocks = []
         
-        # Add summary section
-        blocks.extend([
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": [
-                        {
-                            "type": "text",
-                            "text": {
-                                "content": "概要"
-                            }
+        # H2: 概要 (as separate block)
+        blocks.append({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": "概要"
                         }
-                    ]
-                }
-            },
-            {
+                    }
+                ]
+            }
+        })
+        
+        # Paragraph: 概要本文 (as separate block)
+        if summary and summary.strip():
+            blocks.append({
                 "object": "block",
                 "type": "paragraph",
                 "paragraph": {
@@ -284,27 +286,23 @@ class NotionClient:
                         }
                     ]
                 }
-            },
-            {
-                "object": "block",
-                "type": "divider",
-                "divider": {}
-            },
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {
-                    "rich_text": [
-                        {
-                            "type": "text",
-                            "text": {
-                                "content": "全文"
-                            }
+            })
+        
+        # H2: 全文 (as separate block)
+        blocks.append({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": "全文"
                         }
-                    ]
-                }
+                    }
+                ]
             }
-        ])
+        })
         
         return blocks
     
