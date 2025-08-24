@@ -482,10 +482,14 @@ class SpeechTranscriber:
         
         # Async pipeline components
         self.transcribe_queue = Queue(maxsize=TRANSCRIBE_QUEUE_MAX_SIZE)
-        self.result_queue = Queue()
+        self.realtime_queue = Queue()  # For RealtimePrinter
+        self.results_store = []  # Thread-safe storage for final collection
+        self.results_store_lock = threading.Lock()
+        self.stored_results_count = 0
+        
         self.chunker = AudioChunker(self.recorder, self.transcribe_queue)
         self.executor = ThreadPoolExecutor(max_workers=MAX_TRANSCRIBE_WORKERS)
-        self.printer = RealtimePrinter(self.result_queue)
+        self.printer = RealtimePrinter(self.realtime_queue)
         self.transcription_results: List[TranscriptionResult] = []
     
     def normalize_input(self, user_input: str) -> str:
@@ -585,7 +589,17 @@ class SpeechTranscriber:
                 try:
                     chunk = self.transcribe_queue.get(timeout=1.0)
                     result = self.transcribe_chunk_async(chunk)
-                    self.result_queue.put(result)
+                    
+                    # Fan-out: Send result to both realtime printer and results store
+                    self.realtime_queue.put(result)  # For RealtimePrinter
+                    
+                    # Store for final collection
+                    with self.results_store_lock:
+                        self.results_store.append(result)
+                        self.stored_results_count += 1
+                        if self.stored_results_count <= 5 or self.stored_results_count % 5 == 0:
+                            logger.info(f"Stored results: {self.stored_results_count} chunks")
+                    
                     self.transcribe_queue.task_done()
                 except Empty:
                     continue
@@ -600,7 +614,7 @@ class SpeechTranscriber:
 
 
 class RealtimePrinter:
-    """Real-time output printer with start_ts ordering and sentence-end priority"""
+    """Real-time output printer with start_index ordering and sentence-end priority"""
     
     def __init__(self, result_queue: Queue):
         self.result_queue = result_queue
@@ -609,6 +623,8 @@ class RealtimePrinter:
         self.sentence_buffer = ""  # Buffer for incomplete sentences
         self.is_running = False
         self.stop_event = threading.Event()
+        self.printed_count = 0  # Track printed chunks
+        self.printed_count_lock = threading.Lock()
         
     def start(self):
         """Start printer thread"""
@@ -617,6 +633,7 @@ class RealtimePrinter:
         self.next_expected_chunk_id = 1
         self.pending_results = []
         self.sentence_buffer = ""
+        self.printed_count = 0
         
         printer_thread = threading.Thread(target=self._printer_loop, name="RealtimePrinter")
         printer_thread.daemon = True
@@ -672,10 +689,18 @@ class RealtimePrinter:
         for result in processed:
             self.pending_results.remove(result)
     
+    def get_printed_count(self) -> int:
+        """Get the number of chunks that were printed"""
+        with self.printed_count_lock:
+            return self.printed_count
+    
     def _print_result(self, result: TranscriptionResult):
         """Print single result with sentence-end priority"""
         if not result.text.strip():
             logger.debug(f"Chunk {result.chunk_id}: empty transcription")
+            # Still count empty results as printed
+            with self.printed_count_lock:
+                self.printed_count += 1
             return
         
         # Add to sentence buffer
@@ -705,6 +730,10 @@ class RealtimePrinter:
             print(f"\n=== chunk {result.chunk_id} [{result.start_ts:.1f}s~{result.end_ts:.1f}s] ===")
             print(result.text)
             self.sentence_buffer = ""  # Clear buffer
+        
+        # Increment printed count
+        with self.printed_count_lock:
+            self.printed_count += 1
 
 
 
@@ -787,27 +816,38 @@ def process_transcription(self, text: str, title: str, summary: str, from_chunks
         return success_count == 2
     
 def collect_final_results(self) -> List[TranscriptionResult]:
-        """Collect all transcription results and wait for completion"""
+        """Collect all transcription results from results_store"""
         logger.info("Collecting final transcription results...")
         
-        # Wait for remaining results with timeout
+        # Wait for any remaining in-flight transcriptions with timeout
         timeout_start = time.time()
-        timeout_duration = 30  # 30 seconds timeout
+        timeout_duration = 10  # 10 seconds timeout
         
         while (time.time() - timeout_start) < timeout_duration:
-            try:
-                result = self.result_queue.get(timeout=1.0)
-                result.printed_at = time.time()
-                self.transcription_results.append(result)
-            except Empty:
-                # Check if there are any pending chunks
-                if self.transcribe_queue.empty():
-                    break
+            if self.transcribe_queue.empty():
+                break
+            time.sleep(0.5)
+        
+        # Collect from results_store (thread-safe)
+        with self.results_store_lock:
+            final_results = self.results_store.copy()
+            stored_count = len(final_results)
         
         # Sort by start index for final processing
-        self.transcription_results.sort(key=lambda r: r.start_index)
-        logger.info(f"Collected {len(self.transcription_results)} transcription results")
-        return self.transcription_results
+        final_results.sort(key=lambda r: r.start_index)
+        
+        # Log collection summary
+        printed_count = self.printer.get_printed_count() if hasattr(self.printer, 'get_printed_count') else 'unknown'
+        logger.info(f"Final collect: {stored_count} chunks stored, {printed_count} chunks printed")
+        
+        if stored_count != printed_count and printed_count != 'unknown':
+            logger.warning(f"Mismatch: stored={stored_count}, printed={printed_count}")
+        
+        if stored_count == 0:
+            logger.warning("No transcription results collected from results_store")
+        
+        self.transcription_results = final_results
+        return final_results
     
 def combine_and_process_results(self, results: List[TranscriptionResult]) -> str:
         """Combine results and apply final processing"""
