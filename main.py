@@ -375,6 +375,7 @@ class SpeechTranscriber:
             worker_thread.daemon = True
             worker_thread.start()
 
+
 class RealtimePrinter:
     """Real-time output printer with start_ts ordering and sentence-end priority"""
     
@@ -481,8 +482,11 @@ class RealtimePrinter:
             print(f"\n=== chunk {result.chunk_id} [{result.start_ts:.1f}s~{result.end_ts:.1f}s] ===")
             print(result.text)
             self.sentence_buffer = ""  # Clear buffer
-        
-    def transcribe_audio(self, audio_file_path: str) -> Optional[str]:
+
+
+
+# Add methods to SpeechTranscriber class dynamically
+def transcribe_audio(self, audio_file_path: str) -> Optional[str]:
         """Transcribe audio using OpenAI gpt-4o-transcribe"""
         try:
             with open(audio_file_path, 'rb') as audio_file:
@@ -504,18 +508,18 @@ class RealtimePrinter:
             print(f"Error during transcription: {e}")
             return None
     
-    def apply_text_corrections(self, text: str, title: str, summary: str, from_chunks: bool = False) -> str:
-        """Apply comprehensive text correction: duplicate removal + local normalization + AI correction"""
-        corrected_text = text
-        
-        # Stage 0: Remove duplicates if combining from chunks
-        if from_chunks:
-            try:
-                corrected_text = refine_duplicates_with_ai(corrected_text)
-                print("✓ Applied AI duplicate removal")
-            except Exception as e:
-                print(f"⚠ AI duplicate removal failed: {e}")
-                print("Proceeding without AI duplicate removal")
+def apply_text_corrections(self, text: str, title: str, summary: str, from_chunks: bool = False) -> str:
+    """Apply comprehensive text correction: duplicate removal + local normalization + AI correction"""
+    corrected_text = text
+    
+    # Stage 0: Remove duplicates if combining from chunks
+    if from_chunks:
+        try:
+            corrected_text = refine_duplicates_with_ai(corrected_text)
+            print("✓ Applied AI duplicate removal")
+        except Exception as e:
+            print(f"⚠ AI duplicate removal failed: {e}")
+            print("Proceeding without AI duplicate removal")
         
         # Stage 1: Local normalization (if enabled)
         if NORMALIZE_TECH_TERMS:
@@ -536,7 +540,7 @@ class RealtimePrinter:
         
         return corrected_text
     
-    def process_transcription(self, text: str, title: str, summary: str, from_chunks: bool = False):
+def process_transcription(self, text: str, title: str, summary: str, from_chunks: bool = False):
         """Process transcription by sending to Discord and Notion"""
         # Apply comprehensive text correction before saving
         corrected_text = self.apply_text_corrections(text, title, summary, from_chunks=from_chunks)
@@ -559,7 +563,7 @@ class RealtimePrinter:
         
         return success_count == 2
     
-    def collect_final_results(self) -> List[TranscriptionResult]:
+def collect_final_results(self) -> List[TranscriptionResult]:
         """Collect all transcription results and wait for completion"""
         logger.info("Collecting final transcription results...")
         
@@ -582,7 +586,7 @@ class RealtimePrinter:
         logger.info(f"Collected {len(self.transcription_results)} transcription results")
         return self.transcription_results
     
-    def combine_and_process_results(self, results: List[TranscriptionResult]) -> str:
+def combine_and_process_results(self, results: List[TranscriptionResult]) -> str:
         """Combine results and apply final processing"""
         if not results:
             return ""
@@ -609,7 +613,7 @@ class RealtimePrinter:
         final_text = format_text_with_periods(refined_text)
         return final_text
 
-    def run(self):
+def run(self):
         """Main application loop with async pipeline"""
         print("Speech Transcriber - Async Pipeline Version")
         print("=" * 50)
@@ -706,7 +710,7 @@ class RealtimePrinter:
             print(f"Error: {e}")
             self._cleanup_pipeline()
     
-    def _cleanup_pipeline(self):
+def _cleanup_pipeline(self):
         """Clean up pipeline components"""
         try:
             self.chunker.stop()
@@ -715,6 +719,16 @@ class RealtimePrinter:
             logger.info("Pipeline cleanup completed")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
+
+
+# Dynamically assign methods to SpeechTranscriber class
+SpeechTranscriber.transcribe_audio = transcribe_audio
+SpeechTranscriber.apply_text_corrections = apply_text_corrections
+SpeechTranscriber.process_transcription = process_transcription
+SpeechTranscriber.collect_final_results = collect_final_results
+SpeechTranscriber.combine_and_process_results = combine_and_process_results
+SpeechTranscriber.run = run
+SpeechTranscriber._cleanup_pipeline = _cleanup_pipeline
 
 if __name__ == "__main__":
     app = SpeechTranscriber()
