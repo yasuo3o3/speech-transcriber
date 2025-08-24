@@ -77,14 +77,15 @@ def normalize_tech_terms(text: str) -> str:
     
     return result
 
-def postprocess_with_ai(text: str, context_hint: str = "", test_mode: bool = False) -> str:
+def postprocess_with_ai(text: str, context_hint: str = "", test_mode: bool = False, model: str = "gpt-4o-mini") -> str:
     """
-    Post-process text using AI for light correction of punctuation and typos.
+    Post-process text using AI for boundary-only correction (non-summarizing).
     
     Args:
         text: Input text to correct
         context_hint: Context information (title + summary)
         test_mode: If True, returns both gpt-4o-mini and gpt-4o results
+        model: Model to use for production (default: gpt-4o-mini)
         
     Returns:
         Corrected text, or formatted comparison in test mode
@@ -92,7 +93,15 @@ def postprocess_with_ai(text: str, context_hint: str = "", test_mode: bool = Fal
     if not text.strip():
         return text
     
-    system_prompt = """入力テキストを壊さず、句読点・誤字を軽く整える。内容は変えない。専門用語やタグ（例: .env, README.md）はそのまま保持。自然な日本語に軽く整形するだけで、大幅な変更は不要。"""
+    # Boundary-only correction prompt (anti-summarization)
+    system_prompt = """以下のテキストを、意味の要約・圧縮・言い換えを一切行わずに軽く整形してください。
+タスク：
+- 句読点・誤字の軽微な修正のみ。
+- 専門用語やタグ（例: .env, README.md）はそのまま保持。
+- 数列や箇条書き、反復表現の短文化は禁止。
+- 非重複部分の削除、語順変更、文意の改変は一切禁止。
+出力は、入力本文と同じ内容・分量を維持したまま、軽微な整形のみ行ったテキストとする。
+返答は本文のみ（前置き/説明/囲みテキスト不要）。"""
     
     user_prompt = f"以下のテキストを軽く補正してください：\n\n{text}"
     if context_hint.strip():
@@ -100,33 +109,47 @@ def postprocess_with_ai(text: str, context_hint: str = "", test_mode: bool = Fal
     
     client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
     
-    def get_ai_correction(model: str) -> str:
+    def get_ai_correction(correction_model: str) -> str:
         try:
             response = client.chat.completions.create(
-                model=model,
+                model=correction_model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.1,
+                temperature=0.05,  # Lower temperature for consistency
                 max_tokens=4000
             )
-            return response.choices[0].message.content.strip()
+            result = response.choices[0].message.content.strip()
+            
+            # Safety check: revert if too much change
+            from difflib import SequenceMatcher
+            similarity = SequenceMatcher(None, text, result).ratio()
+            length_change = abs(len(result) - len(text)) / len(text) if len(text) > 0 else 0
+            
+            if similarity < 0.95 or length_change > 0.1:
+                print(f"AI postprocess reverted (similarity={similarity:.3f}, delta={length_change:.3f})")
+                return text
+            
+            return result
         except Exception as e:
-            print(f"AI correction error with {model}: {e}")
+            print(f"AI correction error with {correction_model}: {e}")
             return text
     
     if test_mode:
         mini_result = get_ai_correction("gpt-4o-mini")
         gpt4o_result = get_ai_correction("gpt-4o")
         
-        return f"""=== gpt-4o-mini 補正結果 ===
+        # In test mode, show both but adopt mini for final output
+        print(f"""=== gpt-4o-mini 補正結果 ===
 {mini_result}
 
 === gpt-4o 補正結果 ===
-{gpt4o_result}"""
+{gpt4o_result}""")
+        print("✓ Test mode: Showing both results, adopting gpt-4o-mini")
+        return mini_result
     else:
-        return get_ai_correction("gpt-4o")
+        return get_ai_correction(model)
 
 def format_realtime_text(text: str) -> str:
     """Format text for real-time display with sentence-end priority"""

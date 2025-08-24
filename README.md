@@ -6,10 +6,12 @@ PC（Windows PowerShell）およびAndroid（Pydroid3）で動作する音声文
 
 - 20秒チャンク + 2秒オーバーラップでの高品質音声録音
 - OpenAI gpt-4o-transcribeを使用した高精度文字起こし
+- **録音停止時のテイル保存**: 最後の残りが20秒未満でも必ず保存
+- **サンプル番号基準の正確なタイムライン管理**で音声欠落を防止
 - 「。」ごとの自動改行で読みやすいテキスト整形
 - **保存直前の二段補正処理**：
   1) ローカルフィルター：全角→半角正規化＋技術用語ホワイトリスト置換
-  2) AI補正：gpt-4o による軽い整形（句読点・誤字を軽く補正）
+  2) AI補正：gpt-4o-mini による境界限定補正（本文要約禁止）
 - Discordへのタイトル＋概要通知
 - Notionへのタイトル＋概要＋本文全文保存
 - エラー時の自動リトライ機能
@@ -24,34 +26,35 @@ PC（Windows PowerShell）およびAndroid（Pydroid3）で動作する音声文
 
 ### 1. 依存パッケージのインストール
 
-\`\`\`bash
+```bash
 pip install -r requirements.txt
-\`\`\`
+```
 
 #### Android（Pydroid3）の場合
 
 Pydroid3アプリ内で以下のパッケージを個別にインストールしてください：
 
-\`\`\`bash
+```bash
 pip install openai
 pip install sounddevice
 pip install numpy
 pip install requests
 pip install python-dotenv
 pip install notion-client
-\`\`\`
+pip install scipy
+```
 
 ### 2. 環境変数の設定
 
-\`.envSample\`を\`.env\`にコピーし、必要な値を設定してください：
+`.envSample`を`.env`にコピーし、必要な値を設定してください：
 
-\`\`\`bash
+```bash
 cp .envSample .env
-\`\`\`
+```
 
-\`.env\`ファイルに以下の情報を入力：
+`.env`ファイルに以下の情報を入力：
 
-\`\`\`env
+```env
 # OpenAI API Configuration
 OPENAI_API_KEY=your_openai_api_key_here
 
@@ -65,15 +68,26 @@ NOTION_PARENT_PAGE_ID=your_notion_parent_page_id_here
 # Text Processing Configuration
 NORMALIZE_TECH_TERMS=true
 POSTPROCESS_TEST_MODE=false
-\`\`\`
+POSTPROCESS_MODEL=gpt-4o-mini
+AI_DEDUP_MODE=boundary_only
+TAIL_MIN_SEC=1.0
+```
 
 #### 補正処理の設定
 
-- **NORMALIZE_TECH_TERMS**: ローカルフィルターの有効/無効（\`true\`/\`false\`）
+- **NORMALIZE_TECH_TERMS**: ローカルフィルターの有効/無効（`true`/`false`）
   - 全角英数記号を半角化、技術用語を統一（.env, README.md, Git/GitHub, Python など）
-- **POSTPROCESS_TEST_MODE**: AI補正のテストモード（\`true\`/\`false\`）
-  - \`false\`: gpt-4o のみで補正
-  - \`true\`: gpt-4o-mini と gpt-4o 両方の結果を表示して比較
+- **POSTPROCESS_MODEL**: 最終補正に使用するAIモデル（既定: `gpt-4o-mini`）
+  - `gpt-4o-mini`: より素直で安全な補正（推奨）
+  - `gpt-4o`: より高性能だが言い回しを動かしがち
+- **POSTPROCESS_TEST_MODE**: AI補正のテストモード（`true`/`false`）
+  - `false`: POSTPROCESS_MODEL で補正
+  - `true`: gpt-4o-mini と gpt-4o 両方の結果を表示し比較、最終採用は mini
+- **AI_DEDUP_MODE**: AI重複除去モード（`boundary_only`/`off`）
+  - `boundary_only`: 境界の重複のみ除去、本文要約禁止（既定）
+  - `off`: AI重複除去を完全無効化
+- **TAIL_MIN_SEC**: 録音停止時の最小テイル保存秒数（既定: `1.0`）
+  - Enter押下後の残り発話が指定秒数以上なら必ず保存
 
 #### 各APIキーの取得方法
 
@@ -99,10 +113,10 @@ POSTPROCESS_TEST_MODE=false
    NOTION_PARENT_PAGE_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 .env 例：
-\`\`\`
+```
 NOTION_TOKEN=secret_xxxxxxxxxxxxxxxxx
 NOTION_PARENT_PAGE_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-\`\`\`
+```
 
 **B. 既存インテグレーションを「使い回す」場合（ハマりどころ）**
 
@@ -128,21 +142,21 @@ NOTION_PARENT_PAGE_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ### PC（Windows PowerShell）での実行
 
-\`\`\`bash
+```bash
 python main.py
-\`\`\`
+```
 
 ### Windowsでワンボタン実行する方法
 
 プロジェクトのルートディレクトリ（main.py がある場所）に `run_transcriber.bat` というファイルを作成し、以下の内容を貼り付けて保存します：
 
-\`\`\`batch
+```batch
 @echo off
 REM ===== Speech Transcriber 実行バッチ =====
 cd /d %~dp0
 python main.py
 pause
-\`\`\`
+```
 
 **各行の説明:**
 - `cd /d %~dp0` : このバッチファイルが置いてある場所に移動します
@@ -158,19 +172,20 @@ pause
 ### Android（Pydroid3）での実行
 
 1. Pydroid3アプリでプロジェクトフォルダを開く
-2. \`main.py\`を実行
+2. `main.py`を実行
 
 ## 操作手順
 
 1. プログラムを実行すると音声録音が開始されます
 2. **Enterキー**を押すと録音が停止します
-3. 保存確認が表示されます：
+3. **録音停止時のテイル保存**: 最後の残り（20秒未満でも TAIL_MIN_SEC 以上なら）を必ず保存
+4. 保存確認が表示されます：
    - 保存可否のプロンプトには **y** または **n** で回答してください（全角ｙ／ｎも可）
    - その他の入力は無効として再入力を促します
-4. \`n\`を選択した場合：
+5. `n`を選択した場合：
    - **No を選んだ場合のみ破棄の再確認が表示されます**
-   - 再確認で \`y\` なら確定破棄、\`n\` なら保存フローに戻ります
-5. 保存を選択した場合：
+   - 再確認で `y` なら確定破棄、`n` なら保存フローに戻ります
+6. 保存を選択した場合：
    - タイトルを入力
    - 概要を入力  
    - 自動的にDiscordとNotionに保存されます
@@ -181,7 +196,7 @@ pause
 
 ## ファイル構成
 
-\`\`\`
+```
 speech-transcriber/
 ├── main.py              # メインアプリケーション
 ├── discord_client.py    # Discord連携
@@ -195,7 +210,7 @@ speech-transcriber/
 ├── README.md         # このファイル
 └── prompts/
     └── history.md    # 開発履歴
-\`\`\`
+```
 
 ## トラブルシューティング
 
@@ -203,8 +218,13 @@ speech-transcriber/
 
 **音声録音エラー:**
 - マイクのアクセス許可を確認
-- \`sounddevice\`パッケージの再インストール
+- `sounddevice`パッケージの再インストール
 - Windows: オーディオドライバーの更新
+
+**音声デバイス自動検出:**
+- 起動時に利用可能なマイクデバイスを自動検出・優先順位選択
+- サンプルレート（48k/44.1k/32k/16k）も自動フォールバック
+- 48kHz/44.1kHz録音は16kHzへ自動ダウンサンプル
 
 **API接続エラー:**
 - インターネット接続を確認
@@ -246,8 +266,9 @@ speech-transcriber/
 1. **Ring Buffer Producer** (AudioRecorder) - 音声を軽量コールバックでリングバッファに蓄積
 2. **Chunker Thread** (AudioChunker) - 20s/2s overlapの連続タイムライン管理、チャンク切り出し
 3. **Consumer ThreadPool** - 文字起こしAPIを並列実行
-4. **Real-time Printer** - start_ts整列で順序保証、文末優先の表示制御
+4. **Real-time Printer** - start_index整列で順序保証、文末優先の表示制御
 5. **Gap Detection** - 音声連続性の監視とログ出力
+6. **Tail Chunk Processing** - 録音停止時の残り発話保存（<20sでも保存）
 
 **新しい環境変数:**
 ```env
@@ -255,12 +276,14 @@ speech-transcriber/
 MAX_TRANSCRIBE_WORKERS=2          # 並列文字起こし数
 TRANSCRIBE_QUEUE_MAX_SIZE=10      # キュー最大サイズ
 RING_BUFFER_SECONDS=300          # リングバッファ保持秒数
+TAIL_MIN_SEC=1.0                 # 最小テイル保存秒数
 ```
 
 **ログ機能:**
 - 各チャンクに capture_start/capture_end/api_start/api_end/printed_at を記録
 - 連続チャンクの capture_start 差が (chunk_sec - overlap_sec) ±0.5s から外れたら WARNING ログ
 - API レスポンス時間とキューサイズを監視
+- テイルチャンク処理ログ: `Flushing tail chunk: 5.2s (start=..., end=...)`
 
 ### デバッグモード
 
@@ -275,16 +298,16 @@ RING_BUFFER_SECONDS=300          # リングバッファ保持秒数
 ### コード構成
 
 **v2.0 非同期パイプライン:**
-- \`AudioRecorder\`: Ring Buffer型Producer（軽量コールバック録音）
-- \`AudioChunker\`: チャンク切り出しThread（20s/2s overlap管理）
-- \`RealtimePrinter\`: 順序保証とsentence-end優先の出力制御
-- \`SpeechTranscriber\`: 非同期パイプライン制御とThreadPoolExecutor管理
-- \`DiscordClient\`: Discord Webhook送信
-- \`NotionClient\`: Notion API連携（長文対応）
-- \`utils.py\`: テキスト整形、正規化、AI補正、重複除去
+- `AudioRecorder`: Ring Buffer型Producer（軽量コールバック録音）
+- `AudioChunker`: チャンク切り出しThread（20s/2s overlap管理）
+- `RealtimePrinter`: 順序保証とsentence-end優先の出力制御
+- `SpeechTranscriber`: 非同期パイプライン制御とThreadPoolExecutor管理
+- `DiscordClient`: Discord Webhook送信
+- `NotionClient`: Notion API連携（長文対応）
+- `utils.py`: テキスト整形、正規化、AI補正、重複除去
 
 ### セキュリティ
 
-- APIキーは必ず\`.env\`ファイルで管理
-- \`.gitignore\`により秘密情報の誤コミットを防止
+- APIキーは必ず`.env`ファイルで管理
+- `.gitignore`により秘密情報の誤コミットを防止
 - 適切なエラーハンドリングでAPIキーの漏洩を防止
