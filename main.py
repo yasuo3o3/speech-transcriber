@@ -42,25 +42,45 @@ logger = logging.getLogger('SpeechTranscriber')
 
 @dataclass
 class AudioChunk:
-    """Audio chunk with timing information"""
-    start_ts: float
-    end_ts: float
+    """Audio chunk with sample index and timing information"""
+    start_index: int
+    end_index: int
     audio_data: np.ndarray
     chunk_id: int
     capture_start: float
     capture_end: float
+    
+    @property
+    def start_ts(self) -> float:
+        """Convert start index to timestamp for display"""
+        return self.start_index / 16000
+    
+    @property
+    def end_ts(self) -> float:
+        """Convert end index to timestamp for display"""
+        return self.end_index / 16000
 
 @dataclass
 class TranscriptionResult:
-    """Transcription result with timing and latency information"""
+    """Transcription result with sample index and latency information"""
     chunk_id: int
-    start_ts: float
-    end_ts: float
+    start_index: int
+    end_index: int
     text: str
     api_start: float
     api_end: float
     api_latency_ms: int
     printed_at: Optional[float] = None
+    
+    @property
+    def start_ts(self) -> float:
+        """Convert start index to timestamp for display"""
+        return self.start_index / 16000
+    
+    @property
+    def end_ts(self) -> float:
+        """Convert end index to timestamp for display"""
+        return self.end_index / 16000
 
 # User prompt messages
 MSG_SAVE_CONFIRM = "今回の文字起こしを保存しますか？ (y=保存 / n=破棄): "  # EN: "Do you want to save this recording? (y=save / n=discard): "
@@ -91,19 +111,20 @@ class AudioRecorder:
         # Callback monitoring
         self.callback_count = 0
         self.received_samples_total = 0
+        self.next_sample_index = 0  # Next sample index to assign
         self.last_sample_report_time = 0
         self.downsample_logged = False
         
-        # Ring buffer for audio samples - stores (timestamp, audio_data) tuples
+        # Ring buffer for audio samples - stores (start_index, ndarray) tuples
         buffer_size = int(self.target_sample_rate * RING_BUFFER_SECONDS)
-        self.ring_buffer = deque(maxlen=buffer_size)
+        self.ring_buffer = deque(maxlen=buffer_size // 1024)  # Store chunks, not individual samples
         self.buffer_lock = threading.Lock()
         self.recording_start_time = None
         
         # Auto-detect and configure audio device
         self._auto_configure_audio()
         
-        logger.info(f"AudioRecorder initialized: target {self.target_sample_rate}Hz/{self.target_channels}ch, buffer {buffer_size} samples")
+        logger.info(f"AudioRecorder initialized: target {self.target_sample_rate}Hz/{self.target_channels}ch, buffer capacity {buffer_size} samples")
         
     def _auto_configure_audio(self):
         """Auto-detect optimal input device and sample rate with fallback"""
@@ -254,11 +275,11 @@ class AudioRecorder:
                     logger.info(f"Received samples: {self.received_samples_total} (callback #{self.callback_count})")
                     self.last_sample_report_time = current_report_time
                 
-                # Store in ring buffer with timestamps
+                # Store in ring buffer with sample indices
                 with self.buffer_lock:
-                    for i, sample in enumerate(processed_audio):
-                        sample_timestamp = current_time + (i / self.target_sample_rate)
-                        self.ring_buffer.append((sample_timestamp, sample))
+                    chunk_start_index = self.next_sample_index
+                    self.ring_buffer.append((chunk_start_index, processed_audio.copy()))
+                    self.next_sample_index += len(processed_audio)
                         
             except Exception as e:
                 logger.error(f"Callback processing error: {e}")
@@ -305,54 +326,87 @@ class AudioRecorder:
         print("\nRecording stopped.")
         logger.info("Recording stop signal sent")
     
-    def extract_chunk(self, start_ts: float, end_ts: float) -> Optional[np.ndarray]:
-        """Extract audio chunk from ring buffer by timestamp"""
+    def extract_chunk_by_index(self, start_index: int, end_index: int) -> Optional[np.ndarray]:
+        """Extract audio chunk from ring buffer by sample index range"""
         with self.buffer_lock:
             if not self.ring_buffer:
-                logger.warning(f"Ring buffer is empty when extracting chunk {start_ts:.1f}-{end_ts:.1f}s")
+                logger.warning(f"Ring buffer is empty when extracting chunk [{start_index}-{end_index})")
                 return None
             
+            # Find all chunks that overlap with the requested range
             chunk_samples = []
-            for timestamp, sample in self.ring_buffer:
-                if start_ts <= timestamp <= end_ts:
-                    chunk_samples.append(sample)
+            collected_samples = 0
+            
+            for chunk_start_idx, chunk_data in self.ring_buffer:
+                chunk_end_idx = chunk_start_idx + len(chunk_data)
+                
+                # Check if chunk overlaps with requested range
+                if chunk_end_idx <= start_index or chunk_start_idx >= end_index:
+                    continue  # No overlap
+                
+                # Calculate overlap range
+                overlap_start = max(start_index, chunk_start_idx)
+                overlap_end = min(end_index, chunk_end_idx)
+                
+                # Extract overlapping portion
+                chunk_offset_start = overlap_start - chunk_start_idx
+                chunk_offset_end = overlap_end - chunk_start_idx
+                
+                overlapping_data = chunk_data[chunk_offset_start:chunk_offset_end]
+                chunk_samples.append(overlapping_data)
+                collected_samples += len(overlapping_data)
             
             if chunk_samples:
-                logger.debug(f"Extracted {len(chunk_samples)} samples for chunk {start_ts:.1f}-{end_ts:.1f}s")
-                return np.array(chunk_samples, dtype=np.int16)
+                result = np.concatenate(chunk_samples) if len(chunk_samples) > 1 else chunk_samples[0]
+                logger.debug(f"Extracted {len(result)} samples for index range [{start_index}-{end_index})")
+                return result.astype(np.int16)
             else:
-                logger.warning(f"No samples found in ring buffer for time range {start_ts:.1f}-{end_ts:.1f}s")
+                logger.warning(f"No samples found in ring buffer for index range [{start_index}-{end_index})")
                 return None
     
     def get_recording_duration(self) -> float:
-        """Get current recording duration"""
-        if self.recording_start_time is None:
-            return 0.0
-        return time.time() - self.recording_start_time
+        """Get current recording duration based on sample count"""
+        with self.buffer_lock:
+            return self.next_sample_index / self.target_sample_rate
+    
+    def get_current_sample_index(self) -> int:
+        """Get current sample index (total samples received)"""
+        with self.buffer_lock:
+            return self.next_sample_index
 
 class AudioChunker:
-    """Chunker Thread - extracts 20s/2s overlap chunks from ring buffer"""
+    """Chunker Thread - extracts 20s/2s overlap chunks from ring buffer using sample indices"""
     
     def __init__(self, recorder: AudioRecorder, transcribe_queue: Queue):
         self.recorder = recorder
         self.transcribe_queue = transcribe_queue
-        self.chunk_duration = 20
-        self.overlap_duration = 2
+        self.chunk_duration = 20  # seconds
+        self.overlap_duration = 2  # seconds
         self.chunk_interval = self.chunk_duration - self.overlap_duration  # 18s
+        
+        # Convert to sample counts
+        self.chunk_len_samples = int(self.chunk_duration * recorder.target_sample_rate)  # 320,000 samples
+        self.overlap_samples = int(self.overlap_duration * recorder.target_sample_rate)  # 32,000 samples
+        self.chunk_interval_samples = self.chunk_len_samples - self.overlap_samples  # 288,000 samples
+        
         self.chunk_id_counter = 0
+        self.next_window_start_index = 0
         self.is_running = False
         self.stop_event = threading.Event()
+        self.debug_logged = False
         
     def start(self):
         """Start chunker thread"""
         self.is_running = True
         self.stop_event.clear()
         self.chunk_id_counter = 0
+        self.next_window_start_index = 0
+        self.debug_logged = False
         
         chunker_thread = threading.Thread(target=self._chunker_loop)
         chunker_thread.daemon = True
         chunker_thread.start()
-        logger.info("AudioChunker started")
+        logger.info(f"AudioChunker started: {self.chunk_len_samples} samples/chunk, {self.chunk_interval_samples} samples interval")
         return chunker_thread
     
     def stop(self):
@@ -362,29 +416,35 @@ class AudioChunker:
         logger.info("AudioChunker stop signal sent")
     
     def _chunker_loop(self):
-        """Main chunker loop - time-based window sliding"""
-        next_chunk_time = self.chunk_duration  # First chunk at 20s
+        """Main chunker loop - sample index-based window sliding"""
         
         while not self.stop_event.is_set():
-            current_duration = self.recorder.get_recording_duration()
+            current_sample_index = self.recorder.get_current_sample_index()
+            window_end_index = self.next_window_start_index + self.chunk_len_samples
             
-            if current_duration >= next_chunk_time:
+            # Check if we have enough samples for the next chunk
+            if current_sample_index >= window_end_index:
                 capture_start = time.time()
                 
-                # Calculate chunk time window
-                chunk_end_ts = self.recorder.recording_start_time + next_chunk_time
-                chunk_start_ts = chunk_end_ts - self.chunk_duration
-                
-                # Extract audio data from ring buffer
-                audio_data = self.recorder.extract_chunk(chunk_start_ts, chunk_end_ts)
+                # Extract audio data from ring buffer by sample index
+                audio_data = self.recorder.extract_chunk_by_index(
+                    self.next_window_start_index, 
+                    window_end_index
+                )
                 
                 if audio_data is not None and len(audio_data) > 0:
                     self.chunk_id_counter += 1
                     capture_end = time.time()
                     
+                    # Debug logging for first few chunks
+                    if not self.debug_logged and self.chunk_id_counter <= 2:
+                        logger.debug(f"Chunker requested [{self.next_window_start_index}-{window_end_index}), got {len(audio_data)} samples")
+                        if self.chunk_id_counter == 2:
+                            self.debug_logged = True
+                    
                     chunk = AudioChunk(
-                        start_ts=chunk_start_ts,
-                        end_ts=chunk_end_ts, 
+                        start_index=self.next_window_start_index,
+                        end_index=window_end_index,
                         audio_data=audio_data,
                         chunk_id=self.chunk_id_counter,
                         capture_start=capture_start,
@@ -397,25 +457,21 @@ class AudioChunker:
                     
                     try:
                         self.transcribe_queue.put(chunk, timeout=1.0)
-                        logger.debug(f"Chunk {self.chunk_id_counter} queued: {chunk_start_ts:.1f}-{chunk_end_ts:.1f}s, {len(audio_data)} samples")
+                        logger.debug(f"Chunk {self.chunk_id_counter} queued: [{self.next_window_start_index}-{window_end_index}) = {chunk.start_ts:.1f}-{chunk.end_ts:.1f}s, {len(audio_data)} samples")
                         
-                        # Check for audio gaps
-                        if self.chunk_id_counter > 1:
-                            expected_interval = self.chunk_interval
-                            actual_interval = chunk_start_ts - (self.recorder.recording_start_time + (self.chunk_id_counter - 2) * self.chunk_interval)
-                            if abs(actual_interval - expected_interval) > 0.5:
-                                logger.warning(f"Audio timeline gap detected: expected {expected_interval}s, got {actual_interval:.1f}s")
-                                
                     except:
                         logger.error(f"Failed to queue chunk {self.chunk_id_counter} - queue full, dropping")
+                    
+                    # Move to next window position (with overlap)
+                    self.next_window_start_index += self.chunk_interval_samples
                         
                 else:
-                    logger.warning(f"No audio data for chunk at {next_chunk_time}s")
-                
-                # Move to next chunk time
-                next_chunk_time += self.chunk_interval
+                    logger.warning(f"No audio data for chunk at sample index [{self.next_window_start_index}-{window_end_index})")
+                    # Still advance the window to avoid getting stuck
+                    self.next_window_start_index += self.chunk_interval_samples
             else:
-                time.sleep(0.5)  # Check every 500ms
+                # Wait for more samples
+                time.sleep(0.5)
 
 class SpeechTranscriber:
     def __init__(self):
@@ -494,8 +550,8 @@ class SpeechTranscriber:
             
             result = TranscriptionResult(
                 chunk_id=chunk.chunk_id,
-                start_ts=chunk.start_ts,
-                end_ts=chunk.end_ts,
+                start_index=chunk.start_index,
+                end_index=chunk.end_index,
                 text=transcription_text,
                 api_start=api_start,
                 api_end=api_end,
@@ -512,8 +568,8 @@ class SpeechTranscriber:
             
             return TranscriptionResult(
                 chunk_id=chunk.chunk_id,
-                start_ts=chunk.start_ts,
-                end_ts=chunk.end_ts,
+                start_index=chunk.start_index,
+                end_index=chunk.end_index,
                 text="",
                 api_start=api_start,
                 api_end=api_end,
@@ -748,8 +804,8 @@ def collect_final_results(self) -> List[TranscriptionResult]:
                 if self.transcribe_queue.empty():
                     break
         
-        # Sort by start timestamp for final processing
-        self.transcription_results.sort(key=lambda r: r.start_ts)
+        # Sort by start index for final processing
+        self.transcription_results.sort(key=lambda r: r.start_index)
         logger.info(f"Collected {len(self.transcription_results)} transcription results")
         return self.transcription_results
     
