@@ -1,5 +1,5 @@
 @echo off
 REM ===== Speech Transcriber 実行バッチ =====
-cd /d %~dp0
+cd /d "C:\path\speech-transcriber"
 python main.py
 pause
