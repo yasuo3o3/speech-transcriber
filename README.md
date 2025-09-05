@@ -19,7 +19,7 @@ PC（Windows PowerShell）およびAndroid（Pydroid3）で動作する音声文
 
 ## 必要な環境
 
-- Python 3.8以上
+- Python 3.8以上（必須：型ヒント互換性のため）
 - 音声録音可能な環境（マイク）
 - インターネット接続
 

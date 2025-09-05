@@ -1,7 +1,7 @@
 import os
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 
 from notion_client import Client as NotionAPIClient
 
@@ -24,7 +24,7 @@ class NotionClient:
         else:
             self.client = None
     
-    def chunk_paragraphs_for_notion(self, text: str, max_len: int = PARAGRAPH_CHUNK_LIMIT) -> list[str]:
+    def chunk_paragraphs_for_notion(self, text: str, max_len: int = PARAGRAPH_CHUNK_LIMIT) -> List[str]:
         """Split text into chunks that fit within Notion's paragraph limits"""
         if not text.strip():
             return []
@@ -67,7 +67,7 @@ class NotionClient:
             }
         }
     
-    def append_children_batched(self, blocks: list[dict], parent_id: str, batch_size: int = BATCH_SIZE) -> bool:
+    def append_children_batched(self, blocks: List[Dict], parent_id: str, batch_size: int = BATCH_SIZE) -> bool:
         """Append children blocks in batches with retry logic"""
         total_blocks = len(blocks)
         processed_blocks = 0
@@ -111,7 +111,7 @@ class NotionClient:
         print(f"✓ Successfully sent all {processed_blocks} blocks")
         return True
     
-    def create_or_split_page_for_long_content(self, title: str, header_blocks: list[dict], body_blocks: list[dict], parent_page_id: str) -> bool:
+    def create_or_split_page_for_long_content(self, title: str, header_blocks: List[Dict], body_blocks: List[Dict], parent_page_id: str) -> bool:
         """Create page(s) for content, splitting if necessary"""
         # Calculate total body text length
         total_body_chars = sum(
@@ -181,7 +181,7 @@ class NotionClient:
         print(f"✓ Created {pages_created} pages total")
         return True
     
-    def _create_single_page(self, page_title: str, all_blocks: list[dict], parent_page_id: str) -> bool:
+    def _create_single_page(self, page_title: str, all_blocks: List[Dict], parent_page_id: str) -> bool:
         """Create a single page with all blocks"""
         for attempt in range(self.max_retries):
             try:
@@ -251,7 +251,7 @@ class NotionClient:
             title, header_blocks, body_blocks, self.parent_page_id
         )
     
-    def _build_structured_header_blocks(self, summary: str) -> list[dict]:
+    def _build_structured_header_blocks(self, summary: str) -> List[Dict]:
         """Build properly structured header blocks with clear separation"""
         blocks = []
         

@@ -2,6 +2,7 @@ import os
 import re
 import unicodedata
 from datetime import datetime, timezone, timedelta
+from typing import Tuple
 from openai import OpenAI
 
 def format_text_with_periods(text: str) -> str:
@@ -211,7 +212,7 @@ def _calculate_text_similarity(text1: str, text2: str) -> float:
     matcher = SequenceMatcher(None, text1, text2)
     return matcher.ratio()
 
-def _should_skip_ai_dedup(text: str) -> tuple[bool, str]:
+def _should_skip_ai_dedup(text: str) -> Tuple[bool, str]:
     """Determine if AI deduplication should be skipped based on text patterns"""
     if not text.strip():
         return False, "empty_text"
