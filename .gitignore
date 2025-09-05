@@ -137,3 +137,5 @@ temp_*
 
 .history/
 chatgpt-log.md
+./claude
+.gitignore
